@@ -20,7 +20,7 @@ Training launchers, optimizer code, cache builders, DROID/ARX experiments, onlin
 ```bash
 git clone https://github.com/NVIDIA/cosmos-framework.git
 cd cosmos-framework
-git checkout db7d5194165d6dfd79415c024162a49ecc47e00c
+git checkout ee58e41467f33c49ddde08b4d0ef4923876a95ac
 cd ..
 
 git clone https://github.com/dsdfasfaac/zeva-test.git cosmos-behavior-inference
@@ -36,7 +36,7 @@ Install Cosmos Framework dependencies using the upstream instructions. Obtain th
 https://huggingface.co/frank111222/Cosmos-Behavior-RoboCasa-Atomic5
 ```
 
-The model repository is inference-only and contains the Stage2 DCP model shards, Stage1 VBE/memory bank, Stage3 retrieval head, configs, checksums, and evaluation summary. Qwen, Wan VAE, and RoboCasa assets remain external dependencies under their own licenses.
+`ee58e41467f33c49ddde08b4d0ef4923876a95ac` is a public NVIDIA commit. The model repository is inference-only and contains the Stage2 DCP model shards, Stage1 VBE/memory bank, Stage3 retrieval head, configs, checksums, and evaluation summary. Qwen, Wan VAE, and RoboCasa assets remain external dependencies under their own licenses.
 
 ## Run inference
 

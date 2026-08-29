@@ -19,7 +19,6 @@ from cosmos_framework.model.generator.mot.context_parallel_utils import (
 )
 from cosmos_framework.model.generator.mot.domain_aware_linear import DomainAwareLinear
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
-from cosmos_framework.model.generator.residual_expert import bounded_action_residual
 from cosmos_framework.model.generator.utils.memory import MemoryState
 
 

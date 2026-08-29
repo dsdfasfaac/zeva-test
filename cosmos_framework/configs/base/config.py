@@ -95,25 +95,7 @@ def make_config() -> Config:
     # Register shipped experiments explicitly. (vision_sft_nano also defines
     # vision_sft_nano_mapstyle_dataloader — the CosmosDataLoader variant — in the same module.)
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_nano  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_robolab_one_bottle_anchor_lora  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_robolab_gated_residual  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_robolab_r3  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_robolab_one_bottle_lora  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_jsonl  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_cosmos_behavior_stage2  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robotwin_nano  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robotwin_cosmos_behavior_stage2  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_arx_task7_nano  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_arx_task7_edge  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_arx_task7_model_a  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_arx_task7_model_b  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_arx_task7_model_c  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_arx_task7_model_a_chenfu  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_arx_task7_cosmos_behavior_stage2  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_nano  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_cosmos_behavior_stage2  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_cosmos_behavior_stage2  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_cosmos_behavior_online_memory  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_all_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_fd_droid_posttrain  # noqa: F401

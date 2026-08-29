@@ -41,6 +41,7 @@ import torch.nn.functional as F
 import tyro
 
 from cosmos_framework.data.generator.action.domain_utils import get_domain_id
+from cosmos_framework.data.generator.action.json_formatter import ActionPromptJsonFormatter
 from cosmos_framework.data.generator.action.pose_utils import (
     build_abs_pose_from_components,
     convert_rotation,
@@ -49,6 +50,7 @@ from cosmos_framework.data.generator.action.pose_utils import (
 )
 from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
 from cosmos_framework.data.generator.joint_dataloader import IterativeJointDataLoader
+from cosmos_framework.data.generator.sequence_packing import SequencePlan
 from cosmos_framework.model.behavior import (
     BehaviorEncoderConfig,
     BehaviorRetrievalConfig,
@@ -67,7 +69,7 @@ from cosmos_framework.scripts.action_policy_server_utils import (
     get_local_ip,
     maybe_init_distributed,
 )
-from cosmos_framework.scripts.extract_behavior_cosmos_readout_robocasa import extract_batch, format_action_prompt
+from cosmos_framework.model.generator.utils.data_and_condition import GenerationDataClean
 from cosmos_framework.utils import log
 from cosmos_framework.utils.checkpoint_db import CheckpointDirHf
 from cosmos_framework.utils.lazy_config import instantiate
@@ -89,6 +91,65 @@ _ROBOLAB_POLICY_HF_REPOSITORIES = {
 }
 
 ActionSpace = Literal["joint_pos", "midtrain"]
+
+
+def format_action_prompt(instruction: str) -> str:
+    """Format a RoboCasa instruction exactly as the Stage-3 head saw it."""
+    sample = {
+        "ai_caption": instruction.strip(),
+        "video": torch.empty((3, 33, 1, 1), dtype=torch.uint8),
+        "conditioning_fps": torch.tensor(20.0),
+        "image_size": torch.tensor([480, 832, 480, 832]),
+        "viewpoint": "concat_view",
+        "additional_view_description": _CONCAT_VIEW_DESCRIPTION,
+        "mode": "wam",
+    }
+    formatted = ActionPromptJsonFormatter(caption_key="ai_caption")(sample)["ai_caption"]
+    return json.dumps(formatted) if isinstance(formatted, dict) else str(formatted)
+
+
+@torch.inference_mode()
+def extract_batch(model, latent_batch: torch.Tensor, prompts: list[str]) -> torch.Tensor:
+    """Extract clean initial-image Cosmos readouts used by Stage-3 retrieval."""
+    batch_size = len(prompts)
+    plans = [
+        SequencePlan(has_text=True, has_vision=True, condition_frame_indexes_vision=[0])
+        for _ in prompts
+    ]
+    token_ids = model._tokenize_captions(
+        prompts,
+        use_system_prompt=bool(model.vlm_config.use_system_prompt),
+        system_prompt=None,
+        is_video=False,
+    )
+    clean = GenerationDataClean(
+        batch_size=batch_size,
+        is_image_batch=True,
+        x0_tokens_vision=[latent_batch[i].unsqueeze(0).unsqueeze(2) for i in range(batch_size)],
+        fps_vision=torch.full((batch_size,), 20.0),
+    )
+    packed = model._pack_input_sequence(
+        plans,
+        token_ids,
+        clean,
+        torch.zeros(batch_size, dtype=torch.float32),
+        include_end_of_generation_token=model._derive_include_end_of_generation_token(),
+    )
+    if packed.behavior_indexes.numel() != 0:
+        raise RuntimeError("Clean Stage-3 extraction unexpectedly contains behavior prefix tokens")
+    packed.to_cuda()
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        output = model.net(packed_seq=packed)
+    hidden = output["last_hidden_state"]
+    indexes = packed.vision.sequence_indexes
+    readouts = []
+    sample_start = 0
+    for sample_length in packed.sample_lens:
+        sample_end = sample_start + sample_length
+        sample_indexes = indexes[(indexes >= sample_start) & (indexes < sample_end)]
+        readouts.append(hidden.index_select(0, sample_indexes).mean(dim=0))
+        sample_start = sample_end
+    return torch.stack(readouts).float().cpu()
 
 
 def _load_checkpoint_metadata(checkpoint_path: str) -> dict[str, Any] | None:

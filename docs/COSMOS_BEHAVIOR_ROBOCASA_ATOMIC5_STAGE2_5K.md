@@ -24,7 +24,7 @@ This bundle contains the inference artifacts selected by a full Stage2 checkpoin
 - Stage 1: frozen effect-v3 VBE, behavior memory bank, and causal phase/effect features.
 - Stage 2: `iter_000005000`, warm-started from the Atomic-5 baseline and trained with oracle global behavior.
 - Stage 3: retrieval head trained specifically from the Stage2-5k readout; it is not reused from another checkpoint.
-- Source base commit: `db7d5194165d6dfd79415c024162a49ecc47e00c` plus the Cosmos-Behavior changes in the linked code release.
+- Public source base: NVIDIA Cosmos Framework commit `ee58e41467f33c49ddde08b4d0ef4923876a95ac`, plus the Cosmos-Behavior inference overlay in the linked code release.
 
 ## Repository layout
 
