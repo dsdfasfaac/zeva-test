@@ -124,6 +124,8 @@ The published 78.0% result uses:
 - 50 episodes per task, seeds 195–244;
 - left agent view plus wrist view, horizontally concatenated to 256×512;
 - fixed-base arm9 proprioception and arm7 EEF/gripper actions;
+- model domain name `robocasa-panda-omron`, which resolves to domain ID `22`
+  (raw action width `12`, then Atomic-5 selects channels `[5:12]`);
 - UniPC with 30 denoising steps, guidance 3.0, shift 5.0;
 - a complete 32-action open-loop chunk at 20 Hz, maximum 300 control steps;
 - one fresh simulator process per seed and no video recording.
