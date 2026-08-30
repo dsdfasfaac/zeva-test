@@ -73,6 +73,10 @@ export WAN_VAE_PATH=/path/to/Wan2.2_VAE.pth
 export ROBOCASA365_ROOT=/path/to/robocasa365/target
 ```
 
+The inference-only experiment removes inherited train/val dataloaders and does
+not require `DROID_ROOT`. `ROBOCASA365_ROOT` is needed by the simulator/evaluator,
+not by the policy model loader.
+
 ## Start the learned-retrieval policy server
 
 Clone [dsdfasfaac/zeva-test](https://github.com/dsdfasfaac/zeva-test), enter the framework root, and run:
@@ -147,6 +151,20 @@ and only already-observed four-control transition boundaries needed to construct
 the causal 0→1→2→3→4 effect history. A baseline evaluator that omits these fields
 does not reproduce Stage2/Stage3 inference.
 
+The simulator Python environment must provide `openpi_client`. Installing the
+upstream OpenPI policy-client package is preferred. On headless hosts, MuJoCo
+also needs a working EGL loader; set `MUJOCO_GL=egl`, `PYOPENGL_PLATFORM=egl`,
+and, when the system loader cannot find EGL, prepend the directory containing
+`libEGL.so.1` to `LD_LIBRARY_PATH`.
+
+At startup, require the following server log contract before evaluating:
+
+```text
+learned Stage-3 retrieval enabled bank_entries=2495 top_k=5
+ready domain='robocasa-panda-omron' domain_id=22 ... chunk=32 ...
+guidance=3.0 num_steps=30 shift=5.0 prompt_json=True
+```
+
 ## Result
 
 | Task | Success |
@@ -157,6 +175,16 @@ does not reproduce Stage2/Stage3 inference.
 | TurnOnMicrowave | 47/50 (94%) |
 | CoffeeSetupMug | 17/50 (34%) |
 | **Total** | **195/250 (78.0%)** |
+
+## Public-overlay smoke verification
+
+On 2026-08-30 the inference release was rebuilt on aigc28 from the public
+NVIDIA base plus this overlay, using only the packaged Stage1/2/3 artifacts.
+One `seed=195` episode per task produced 3/5 successes: OpenStandMixerHead,
+CloseToasterOvenDoor, and TurnOnMicrowave succeeded; TurnOnElectricKettle and
+CoffeeSetupMug reached the 300-step limit. This small stochastic smoke test is
+not an estimate of the published 250-episode rate; it verifies that the public
+path loads the exact checkpoint and produces non-zero closed-loop success.
 
 ## License
 

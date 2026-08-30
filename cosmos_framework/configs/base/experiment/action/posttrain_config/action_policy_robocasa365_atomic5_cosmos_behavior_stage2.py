@@ -54,6 +54,12 @@ action_policy_robocasa365_atomic5_cosmos_behavior_stage2["model"]["config"]["vlm
     "pretrained_model_name"
 ] = "${oc.env:QWEN_VLM_PATH}"
 
+# This overlay is an inference release.  Keeping the inherited DROID loader
+# would make OmegaConf resolve an unused ``DROID_ROOT`` environment variable
+# before model construction, so remove both loaders from the serving recipe.
+action_policy_robocasa365_atomic5_cosmos_behavior_stage2["dataloader_train"] = None
+action_policy_robocasa365_atomic5_cosmos_behavior_stage2["dataloader_val"] = None
+
 cs.store(
     group="experiment",
     package="_global_",

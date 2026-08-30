@@ -500,8 +500,10 @@ class RobolabPolicyService:
         self._init_stage2_oracle(args)
         self._lock = threading.Lock()
         self._rng = np.random.default_rng(self.cfg.seed)
+        resolved_domain_id = get_domain_id(self.cfg.domain_name)
         log.info(
-            f"[robolab-policy-server] ready domain={self.cfg.domain_name!r} resolution={self.cfg.resolution!r} "
+            f"[robolab-policy-server] ready domain={self.cfg.domain_name!r} domain_id={resolved_domain_id} "
+            f"resolution={self.cfg.resolution!r} "
             f"action_space={self.cfg.action_space} action_dim={self.cfg.action_dim} "
             f"chunk={self.cfg.action_chunk_size} history={self.cfg.history_length} use_state={self.cfg.use_state} "
             f"image={self.cfg.image_height}x{self.cfg.image_width} fps={self.cfg.conditioning_fps} "
