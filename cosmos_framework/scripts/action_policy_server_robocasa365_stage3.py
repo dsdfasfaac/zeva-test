@@ -426,7 +426,7 @@ class RobolabServerArgs(pydantic.BaseModel):
     history_length: int = 0
     """State/history action rows to trim from the generated action output."""
     format_prompt_as_json: bool | None = None
-    """Serve prompts as structured JSON (matching training ``format_prompt_as_json``)."""
+    """Override structured JSON prompting. The Atomic-5 service defaults this to true."""
     proprio_dim: int = 9
     """Independent fixed-base proprio input: relative EEF pose (7) plus gripper qpos (2)."""
     stage2_memory_bank: Path | None = None
@@ -506,7 +506,8 @@ class RobolabPolicyService:
             f"chunk={self.cfg.action_chunk_size} history={self.cfg.history_length} use_state={self.cfg.use_state} "
             f"image={self.cfg.image_height}x{self.cfg.image_width} fps={self.cfg.conditioning_fps} "
             f"guidance={self.cfg.guidance} num_steps={self.cfg.num_steps} shift={self.cfg.shift} "
-            f"seed={self.cfg.seed} deterministic_seed={self.cfg.deterministic_seed}"
+            f"prompt_json={inferred.get('format_prompt_as_json')} seed={self.cfg.seed} "
+            f"deterministic_seed={self.cfg.deterministic_seed}"
         )
 
     def _build_setup_args(self, args: RobolabServerArgs) -> OmniSetupArgs:
@@ -538,15 +539,17 @@ class RobolabPolicyService:
             action_dataset_config = None
 
         if action_dataset_config is None:
+            format_json = True if args.format_prompt_as_json is None else bool(args.format_prompt_as_json)
+            inferred["format_prompt_as_json"] = format_json
             log.warning(
                 "[robolab-policy-server] no training action dataset config found; using default "
-                f"ActionTransformPipeline (format_prompt_as_json={bool(args.format_prompt_as_json)})"
+                f"ActionTransformPipeline (format_prompt_as_json={format_json})"
             )
             return (
                 ActionTransformPipeline(
                     max_action_dim=max_action_dim,
                     cfg_dropout_rate=0.0,
-                    format_prompt_as_json=bool(args.format_prompt_as_json),
+                    format_prompt_as_json=format_json,
                 ),
                 inferred,
             )
@@ -561,9 +564,10 @@ class RobolabPolicyService:
         if configured_resolution is not None:
             inferred["resolution"] = str(configured_resolution)
 
-        format_json = getattr(action_dataset_config, "format_prompt_as_json", True)
+        format_json = bool(getattr(action_dataset_config, "format_prompt_as_json", True))
         if args.format_prompt_as_json is not None:
             format_json = bool(args.format_prompt_as_json)
+        inferred["format_prompt_as_json"] = format_json
         transform = ActionTransformPipeline(
             tokenizer_config=getattr(action_dataset_config, "tokenizer_config", None),
             cfg_dropout_rate=0.0,

@@ -46,6 +46,8 @@ This bundle contains the inference artifacts selected by a full Stage2 checkpoin
 │       ├── best.pt
 │       └── readouts/{train.pt,val.pt}
 ├── configs/
+├── cosmos_framework/data/generator/action/normalizer_stats/
+│   └── robocasa365_target_action_stats.json
 └── evaluation/
     ├── sweep_summary.json
     ├── sweep_summary.csv
@@ -98,11 +100,20 @@ CUDA_VISIBLE_DEVICES=0 python -u -m \
   --num-steps 30 --guidance 3.0 --shift 5.0 \
   --action-dim 7 --action-chunk-size 32 --conditioning-fps 20 \
   --image-height 256 --image-width 512 \
+  --format-prompt-as-json \
   --no-use-state --history-length 0 \
   --output-dir /tmp/cosmos_behavior_stage2_5k_server
 ```
 
 The `--no-use-state` flag disables the legacy action-as-state path. The fixed-base independent 9D proprioception path embedded in this model remains enabled.
+`--format-prompt-as-json` is mandatory: Atomic-5 was trained with the structured
+RoboCasa action prompt. The specialized Stage-3 server enables it by default,
+but it is kept explicit above so the inference contract is auditable.
+
+The included `robocasa365_target_action_stats.json` is the exact target-set
+statistics used by the dataset adapter. For the selected arm7 channels `[5:12]`,
+min-max normalization is numerically the identity (`min=-1`, `max=1`); the file
+is still shipped to make dataset/config reconstruction complete.
 
 ## Evaluation contract
 

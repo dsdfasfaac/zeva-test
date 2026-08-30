@@ -11,6 +11,7 @@ The released policy reached **195/250 (78.0%)** closed-loop success across five 
 - Stage-2 behavior conditioning and residual injection in Cosmos3-Nano;
 - the RoboCasa365 learned-retrieval policy server;
 - the Atomic-5 inference/model configuration;
+- the RoboCasa365 target action statistics used by the dataset adapter;
 - the exact evaluation contract and launch command.
 
 Training launchers, optimizer code, cache builders, DROID/ARX experiments, online-memory experiments, smoke tests, datasets, checkpoints, and evaluation videos are intentionally excluded.
