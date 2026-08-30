@@ -132,6 +132,21 @@ The published 78.0% result uses:
 
 Do not evaluate with `open-loop-steps=10`; it truncates the 1.6-second action target seen in training and invalidates comparison.
 
+Use the bundled causal-effect evaluator rather than a baseline-only client:
+
+```bash
+python -m cosmos_framework.scripts.eval_cosmos_behavior_robocasa365 \
+  --task OpenStandMixerHead --host 127.0.0.1 --port 8300 \
+  --episodes 1 --seed 195 --open-loop-steps 32 \
+  --split target --render-gpu-device-id 0 --no-video \
+  --output-dir /tmp/cosmos_behavior_eval/OpenStandMixerHead_seed195
+```
+
+The evaluator sends the initial left-plus-wrist observation, arm9 proprioception,
+and only already-observed four-control transition boundaries needed to construct
+the causal 0→1→2→3→4 effect history. A baseline evaluator that omits these fields
+does not reproduce Stage2/Stage3 inference.
+
 ## Result
 
 | Task | Success |

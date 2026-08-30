@@ -10,6 +10,7 @@ The released policy reached **195/250 (78.0%)** closed-loop success across five 
 - Stage-3 retrieval head and memory-bank lookup;
 - Stage-2 behavior conditioning and residual injection in Cosmos3-Nano;
 - the RoboCasa365 learned-retrieval policy server;
+- the matching causal-effect closed-loop evaluator (32-step execution by default);
 - the Atomic-5 inference/model configuration;
 - the RoboCasa365 target action statistics used by the dataset adapter;
 - the exact RoboCasa domain mapping (`robocasa-panda-omron` → model domain ID 22);
