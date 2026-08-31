@@ -7,7 +7,7 @@
 
 set -u
 
-TOML_FILE="examples/toml/sft_config/action_policy_robocasa365_atomic5_cosmos_behavior_pim.toml"
+TOML_FILE="examples/toml/sft_config/action_policy_robocasa365_atomic5_zeva_pim.toml"
 
 : "${ROBOCASA365_ROOT:?Set ROBOCASA365_ROOT to the Atomic-5 RoboCasa365 dataset}"
 : "${BASE_CHECKPOINT_PATH:?Set BASE_CHECKPOINT_PATH to the verified GRU Stage-2 iter-5k DCP}"

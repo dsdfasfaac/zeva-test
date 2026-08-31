@@ -23,7 +23,7 @@ class BehaviorRetrievalConfig:
         return asdict(self)
 
 
-class CosmosBehaviorRetrievalHead(nn.Module):
+class Stage3RetrievalHead(nn.Module):
     """Map a frozen Cosmos action-branch readout into Stage-1 key space."""
 
     def __init__(self, config: BehaviorRetrievalConfig) -> None:

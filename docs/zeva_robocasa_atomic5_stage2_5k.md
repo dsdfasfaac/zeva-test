@@ -13,9 +13,9 @@ tags:
   - dcp
 ---
 
-# Cosmos-Behavior RoboCasa Atomic-5 — Stage2-5k
+# zeva RoboCasa Atomic-5 — Stage2-5k
 
-This bundle contains the inference artifacts selected by a full Stage2 checkpoint sweep for Cosmos-Behavior on RoboCasa365 Atomic-5. The selected checkpoint is `iter_000005000`, which reached **195/250 = 78.0%** success with learned retrieval.
+This bundle contains the inference artifacts selected by a full Stage2 checkpoint sweep for zeva on RoboCasa365 Atomic-5. The selected checkpoint is `iter_000005000`, which reached **195/250 = 78.0%** success with learned retrieval.
 
 ## Model lineage
 
@@ -24,7 +24,7 @@ This bundle contains the inference artifacts selected by a full Stage2 checkpoin
 - Stage 1: frozen effect-v3 VBE, behavior memory bank, and causal phase/effect features.
 - Stage 2: `iter_000005000`, warm-started from the Atomic-5 baseline and trained with oracle global behavior.
 - Stage 3: retrieval head trained specifically from the Stage2-5k readout; it is not reused from another checkpoint.
-- Public source base: NVIDIA Cosmos Framework commit `ee58e41467f33c49ddde08b4d0ef4923876a95ac`, plus the Cosmos-Behavior inference overlay in the linked code release.
+- Public source base: NVIDIA Cosmos Framework commit `ee58e41467f33c49ddde08b4d0ef4923876a95ac`, plus the zeva inference overlay in the linked code release.
 
 ## Repository layout
 
@@ -63,7 +63,7 @@ The following must be obtained separately under their own licenses:
 - Qwen3-VL-8B-Instruct weights;
 - Wan2.2-TI2V-5B VAE weights;
 - RoboCasa365 simulator, assets, and the Atomic-5 dataset;
-- Python/CUDA dependencies required by the linked Cosmos-Behavior code release.
+- Python/CUDA dependencies required by the linked zeva code release.
 
 Set paths before launching:
 
@@ -82,14 +82,14 @@ not by the policy model loader.
 Clone [dsdfasfaac/zeva-test](https://github.com/dsdfasfaac/zeva-test), enter the framework root, and run:
 
 ```bash
-export RELEASE_ROOT=/absolute/path/to/Cosmos-Behavior-RoboCasa-Atomic5-Stage2-5k
+export RELEASE_ROOT=/absolute/path/to/zeva-RoboCasa-Atomic5-Stage2-5k
 export PYTHONPATH=.
 
 CUDA_VISIBLE_DEVICES=0 python -u -m \
   cosmos_framework.scripts.action_policy_server_robocasa365_stage3 \
   --checkpoint-path "$RELEASE_ROOT/weights/stage2_iter_000005000" \
   --allow-dcp-checkpoint \
-  --experiment action_policy_robocasa365_atomic5_cosmos_behavior_stage2 \
+  --experiment action_policy_robocasa365_atomic5_zeva_stage2 \
   --experiment-overrides \
     model.config.tokenizer.vae_path="$WAN_VAE_PATH" \
   --stage2-memory-bank \
@@ -106,7 +106,7 @@ CUDA_VISIBLE_DEVICES=0 python -u -m \
   --image-height 256 --image-width 512 \
   --format-prompt-as-json \
   --no-use-state --history-length 0 \
-  --output-dir /tmp/cosmos_behavior_stage2_5k_server
+  --output-dir /tmp/zeva_stage2_5k_server
 ```
 
 The `--no-use-state` flag disables the legacy action-as-state path. The fixed-base independent 9D proprioception path embedded in this model remains enabled.
@@ -139,11 +139,11 @@ Do not evaluate with `open-loop-steps=10`; it truncates the 1.6-second action ta
 Use the bundled causal-effect evaluator rather than a baseline-only client:
 
 ```bash
-python -m cosmos_framework.scripts.eval_cosmos_behavior_robocasa365 \
+python -m cosmos_framework.scripts.eval_zeva_robocasa365 \
   --task OpenStandMixerHead --host 127.0.0.1 --port 8300 \
   --episodes 1 --seed 195 --open-loop-steps 32 \
   --split target --render-gpu-device-id 0 --no-video \
-  --output-dir /tmp/cosmos_behavior_eval/OpenStandMixerHead_seed195
+  --output-dir /tmp/zeva_eval/OpenStandMixerHead_seed195
 ```
 
 The evaluator sends the initial left-plus-wrist observation, arm9 proprioception,

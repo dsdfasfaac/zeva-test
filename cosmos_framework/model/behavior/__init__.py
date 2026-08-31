@@ -29,7 +29,7 @@ from .pim import (
 )
 from .retrieval import (
     BehaviorRetrievalConfig,
-    CosmosBehaviorRetrievalHead,
+    Stage3RetrievalHead,
     bidirectional_supervised_contrastive_loss,
     retrieve_behavior_values,
 )
@@ -47,7 +47,7 @@ __all__ = [
     "BriefInteractionTrace",
     "gaussian_prior_nll",
     "BehaviorRetrievalConfig",
-    "CosmosBehaviorRetrievalHead",
+    "Stage3RetrievalHead",
     "bidirectional_supervised_contrastive_loss",
     "retrieve_behavior_values",
     "OnlineMemorySchema",

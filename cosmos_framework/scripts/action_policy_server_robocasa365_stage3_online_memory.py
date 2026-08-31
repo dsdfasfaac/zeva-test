@@ -52,7 +52,7 @@ from cosmos_framework.data.generator.joint_dataloader import IterativeJointDataL
 from cosmos_framework.model.behavior import (
     BehaviorEncoderConfig,
     BehaviorRetrievalConfig,
-    CosmosBehaviorRetrievalHead,
+    Stage3RetrievalHead,
     OnlineMemoryEncoder,
     OnlineMemorySchema,
     OnlineTransition,
@@ -800,9 +800,10 @@ class RobolabPolicyService:
             if not args.stage3_retrieval_checkpoint.is_file():
                 raise FileNotFoundError(f"Stage-3 retrieval checkpoint not found: {args.stage3_retrieval_checkpoint}")
             retrieval_payload = torch.load(args.stage3_retrieval_checkpoint, map_location="cpu", weights_only=True)
-            if retrieval_payload.get("format") != "cosmos_behavior_retrieval_head_v1":
+            retrieval_format = retrieval_payload.get("format")
+            if not isinstance(retrieval_format, str) or not retrieval_format.endswith("_retrieval_head_v1"):
                 raise ValueError("Unsupported Stage-3 retrieval checkpoint")
-            self._stage3_retrieval = CosmosBehaviorRetrievalHead(
+            self._stage3_retrieval = Stage3RetrievalHead(
                 BehaviorRetrievalConfig(**retrieval_payload["config"])
             ).to(device)
             self._stage3_retrieval.load_state_dict(retrieval_payload["model"])

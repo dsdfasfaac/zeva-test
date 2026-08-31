@@ -24,7 +24,7 @@ aliases does not rename any state-dict key.
 | policy injection | `inject_causal_prompt()` | `add_gated_pim_residual()` |
 | frozen policy | `OmniMoTModel` / `Cosmos3VFMNetwork` | framework-native model names |
 
-`CosmosBehaviorRetrievalHead` remains **Static Global Behavior Retrieval**. It
+`Stage3RetrievalHead` remains **Static Global Behavior Retrieval**. It
 must not be described as PIM retrieval: it queries a frozen training bank from
 the initial observation and instruction, whereas
 `PhaseConditionedPIMRetrieval` queries same-episode interaction evidence using
@@ -71,7 +71,7 @@ export BEHAVIOR_MEMORY_BANK=/path/to/train_memory_effect_v3.pt
 export BEHAVIOR_PHASE_CACHE=/path/to/stage2_effect_feature_cache_v3
 export BEHAVIOR_PIM_TRAINING_BANK=/path/to/persistent_effect_bank_gru.pt
 
-bash examples/launch_sft_action_policy_robocasa365_atomic5_cosmos_behavior_pim.sh
+bash examples/launch_sft_action_policy_robocasa365_atomic5_zeva_pim.sh
 ```
 
 The default recipe is deliberately short: 500 updates with checkpoints every
@@ -88,7 +88,7 @@ on the original model path:
 PYTHONPATH=. CUDA_VISIBLE_DEVICES=0 python -u -m \
   cosmos_framework.scripts.action_policy_server_robocasa365_stage3_online_memory \
   --checkpoint-path "$BASE_CHECKPOINT_PATH" --allow-dcp-checkpoint \
-  --experiment action_policy_robocasa365_atomic5_cosmos_behavior_stage2 \
+  --experiment action_policy_robocasa365_atomic5_zeva_stage2 \
   --experiment-overrides model.config.tokenizer.vae_path="$WAN_VAE_PATH" \
   --stage2-memory-bank "$BEHAVIOR_MEMORY_BANK" \
   --stage2-vbe-checkpoint /path/to/behavior_vbe_step_000500.pt \
@@ -102,7 +102,7 @@ PYTHONPATH=. CUDA_VISIBLE_DEVICES=0 python -u -m \
 
 For learned conditioning, change the checkpoint and experiment to the PIM
 adapter checkpoint and
-`action_policy_robocasa365_atomic5_cosmos_behavior_pim_inference`, replace
+`action_policy_robocasa365_atomic5_zeva_pim_inference`, replace
 `--pim-shadow` with `--pim-enabled`, and keep all other inference settings
 paired. Do not use the training experiment for serving: its warm-start skip
 list intentionally omits PIM weights when loading the old Stage-2 checkpoint.
@@ -117,7 +117,7 @@ Evaluate repeated attempts on one fixed environment seed:
 
 ```bash
 PYTHONPATH=. python -m \
-  cosmos_framework.scripts.eval_cosmos_behavior_robocasa365_online_memory \
+  cosmos_framework.scripts.eval_zeva_robocasa365_online_memory \
   --task TurnOnMicrowave --host 127.0.0.1 --port 8300 \
   --episodes 10 --seed 195 --seed-mode fixed \
   --expect-memory-conditioning on \

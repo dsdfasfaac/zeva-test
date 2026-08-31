@@ -1,12 +1,12 @@
-# Effect-v3 Stage 2 — RoboCasa Atomic-5.  Requires the baseline environment
-# plus BEHAVIOR_MEMORY_BANK and BEHAVIOR_PHASE_CACHE from the delivered VBE.
+# Frozen-policy PIM adapter. BASE_CHECKPOINT_PATH must be the verified GRU
+# Stage2 iter-5k DCP; only the three behavior_pim_* modules are optimized.
 
 [job]
 task = "vfm"
-experiment = "action_policy_robocasa365_atomic5_cosmos_behavior_stage2"
-project = "cosmos_behavior"
-group = "stage2_robocasa_atomic5_effect_v3"
-name = "stage2_robocasa_atomic5_effect_v3_smoke"
+experiment = "action_policy_robocasa365_atomic5_zeva_pim"
+project = "zeva"
+group = "pim_adapter_robocasa_atomic5"
+name = "pim_adapter_robocasa_atomic5_smoke"
 wandb_mode = "disabled"
 
 [model]
@@ -24,16 +24,16 @@ save_ops_regex = ["fmha"]
 vae_path = "${oc.env:WAN_VAE_PATH}"
 
 [optimizer]
-lr = 2.0e-4
+lr = 5.0e-05
 
 [scheduler]
-cycle_lengths = [100000]
+cycle_lengths = [500]
 
 [dataloader_train]
-max_samples_per_batch = 16
+max_samples_per_batch = 8
 
 [trainer]
-max_iter = 20
+max_iter = 500
 logging_iter = 1
 grad_accum_iter = 1
 
@@ -43,4 +43,4 @@ warmup_resolutions = ["480"]
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter = 20
+save_iter = 100

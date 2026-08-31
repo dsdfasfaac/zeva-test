@@ -16,21 +16,21 @@ import copy
 
 from hydra.core.config_store import ConfigStore
 
-from cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_cosmos_behavior_stage2 import (
-    action_policy_robocasa365_atomic5_cosmos_behavior_stage2,
+from cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva_stage2 import (
+    action_policy_robocasa365_atomic5_zeva_stage2,
 )
 
 cs = ConfigStore.instance()
 
-action_policy_robocasa365_atomic5_cosmos_behavior_online_memory = copy.deepcopy(
-    action_policy_robocasa365_atomic5_cosmos_behavior_stage2
+action_policy_robocasa365_atomic5_zeva_online_memory = copy.deepcopy(
+    action_policy_robocasa365_atomic5_zeva_stage2
 )
-action_policy_robocasa365_atomic5_cosmos_behavior_online_memory["job"].update(
-    project="cosmos_behavior",
+action_policy_robocasa365_atomic5_zeva_online_memory["job"].update(
+    project="zeva",
     group="online_memory_robocasa_atomic5",
-    name="action_policy_robocasa365_atomic5_cosmos_behavior_online_memory",
+    name="action_policy_robocasa365_atomic5_zeva_online_memory",
 )
-behavior = action_policy_robocasa365_atomic5_cosmos_behavior_online_memory["model"]["config"]["behavior_stage2"]
+behavior = action_policy_robocasa365_atomic5_zeva_online_memory["model"]["config"]["behavior_stage2"]
 behavior.update(
     online_memory_enabled=True,
     online_context_dim=256,
@@ -41,17 +41,17 @@ behavior.update(
 # again.  Only the new zero-init Cosmos action-branch projector is optimized;
 # the query/key/value/history encoder is trained by the preceding
 # history-only recipe and loaded into the context cache.
-keys = action_policy_robocasa365_atomic5_cosmos_behavior_online_memory["optimizer"]["keys_to_select"]
+keys = action_policy_robocasa365_atomic5_zeva_online_memory["optimizer"]["keys_to_select"]
 # Stage-2 checkpoint parameters and the Cosmos backbone must remain frozen in
 # this adaptation.  Replacing (rather than subtracting from) the inherited
 # selector also prevents the base RoboCasa recipe's action/proprio modules from
 # being silently optimized.
 keys[:] = ["behavior_online_projector"]
-action_policy_robocasa365_atomic5_cosmos_behavior_online_memory["optimizer"]["lr_multipliers"].update(
+action_policy_robocasa365_atomic5_zeva_online_memory["optimizer"]["lr_multipliers"].update(
     behavior_online_projector=5.0,
 )
 
-dataset = action_policy_robocasa365_atomic5_cosmos_behavior_online_memory["dataloader_train"]["dataloader"]["datasets"][
+dataset = action_policy_robocasa365_atomic5_zeva_online_memory["dataloader_train"]["dataloader"]["datasets"][
     "robocasa365"
 ]["dataset"]
 dataset["behavior_memory_bank"] = "${oc.env:BEHAVIOR_MEMORY_BANK}"
@@ -61,6 +61,6 @@ dataset["behavior_online_context_cache"] = "${oc.env:BEHAVIOR_ONLINE_CONTEXT_CAC
 cs.store(
     group="experiment",
     package="_global_",
-    name="action_policy_robocasa365_atomic5_cosmos_behavior_online_memory",
-    node=action_policy_robocasa365_atomic5_cosmos_behavior_online_memory,
+    name="action_policy_robocasa365_atomic5_zeva_online_memory",
+    node=action_policy_robocasa365_atomic5_zeva_online_memory,
 )

@@ -20,13 +20,13 @@ from cosmos_framework.configs.base.experiment.action.posttrain_config.action_pol
 
 cs = ConfigStore.instance()
 
-action_policy_robocasa365_atomic5_cosmos_behavior_stage2 = copy.deepcopy(action_policy_droid_nano)
-action_policy_robocasa365_atomic5_cosmos_behavior_stage2["job"].update(
-    project="cosmos_behavior",
+action_policy_robocasa365_atomic5_zeva_stage2 = copy.deepcopy(action_policy_droid_nano)
+action_policy_robocasa365_atomic5_zeva_stage2["job"].update(
+    project="zeva",
     group="stage2_robocasa_atomic5_effect_v3",
-    name="action_policy_robocasa365_atomic5_cosmos_behavior_stage2",
+    name="action_policy_robocasa365_atomic5_zeva_stage2",
 )
-action_policy_robocasa365_atomic5_cosmos_behavior_stage2["model"]["config"]["behavior_stage2"] = dict(
+action_policy_robocasa365_atomic5_zeva_stage2["model"]["config"]["behavior_stage2"] = dict(
     enabled=True,
     global_dim=256,
     phase_dim=128,
@@ -43,26 +43,26 @@ action_policy_robocasa365_atomic5_cosmos_behavior_stage2["model"]["config"]["beh
     global_prefix_tokens=1,
     leading_condition_steps=0,
 )
-action_policy_robocasa365_atomic5_cosmos_behavior_stage2["model"]["config"]["proprio_condition"] = dict(
+action_policy_robocasa365_atomic5_zeva_stage2["model"]["config"]["proprio_condition"] = dict(
     enabled=True,
     input_dim=9,
     prefix_tokens=1,
 )
 # The server supplies Qwen explicitly; retain the same environment contract as
 # the training recipe so checkpoint metadata and manual startup agree.
-action_policy_robocasa365_atomic5_cosmos_behavior_stage2["model"]["config"]["vlm_config"]["tokenizer"][
+action_policy_robocasa365_atomic5_zeva_stage2["model"]["config"]["vlm_config"]["tokenizer"][
     "pretrained_model_name"
 ] = "${oc.env:QWEN_VLM_PATH}"
 
 # This overlay is an inference release.  Keeping the inherited DROID loader
 # would make OmegaConf resolve an unused ``DROID_ROOT`` environment variable
 # before model construction, so remove both loaders from the serving recipe.
-action_policy_robocasa365_atomic5_cosmos_behavior_stage2["dataloader_train"] = None
-action_policy_robocasa365_atomic5_cosmos_behavior_stage2["dataloader_val"] = None
+action_policy_robocasa365_atomic5_zeva_stage2["dataloader_train"] = None
+action_policy_robocasa365_atomic5_zeva_stage2["dataloader_val"] = None
 
 cs.store(
     group="experiment",
     package="_global_",
-    name="action_policy_robocasa365_atomic5_cosmos_behavior_stage2",
-    node=action_policy_robocasa365_atomic5_cosmos_behavior_stage2,
+    name="action_policy_robocasa365_atomic5_zeva_stage2",
+    node=action_policy_robocasa365_atomic5_zeva_stage2,
 )

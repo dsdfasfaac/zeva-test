@@ -95,10 +95,10 @@ def make_config() -> Config:
     # Register shipped experiments explicitly. (vision_sft_nano also defines
     # vision_sft_nano_mapstyle_dataloader — the CosmosDataLoader variant — in the same module.)
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_nano  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_cosmos_behavior_stage2  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_cosmos_behavior_online_memory  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_cosmos_behavior_pim  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_cosmos_behavior_pim_inference  # noqa: F401
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva_stage2  # noqa: F401
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva_online_memory  # noqa: F401
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva_pim  # noqa: F401
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva_pim_inference  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_all_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_fd_droid_posttrain  # noqa: F401
