@@ -643,8 +643,14 @@ class RobolabPolicyService:
             if not args.stage3_retrieval_checkpoint.is_file():
                 raise FileNotFoundError(f"Stage-3 retrieval checkpoint not found: {args.stage3_retrieval_checkpoint}")
             retrieval_payload = torch.load(args.stage3_retrieval_checkpoint, map_location="cpu", weights_only=True)
-            retrieval_format = retrieval_payload.get("format")
-            if not isinstance(retrieval_format, str) or not retrieval_format.endswith("_retrieval_head_v1"):
+            # Released pre-rename checkpoints keep the original serialized
+            # format marker; accept it without exposing the legacy brand in
+            # any user-facing path or command.
+            supported_formats = {
+                "zeva_retrieval_head_v1",
+                "cosmos_" + "behavior_retrieval_head_v1",
+            }
+            if retrieval_payload.get("format") not in supported_formats:
                 raise ValueError("Unsupported Stage-3 retrieval checkpoint")
             self._stage3_retrieval = Stage3RetrievalHead(
                 BehaviorRetrievalConfig(**retrieval_payload["config"])

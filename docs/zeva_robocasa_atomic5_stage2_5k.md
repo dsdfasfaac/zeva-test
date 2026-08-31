@@ -82,7 +82,7 @@ not by the policy model loader.
 Clone [dsdfasfaac/zeva-test](https://github.com/dsdfasfaac/zeva-test), enter the framework root, and run:
 
 ```bash
-export RELEASE_ROOT=/absolute/path/to/zeva-RoboCasa-Atomic5-Stage2-5k
+export RELEASE_ROOT=/absolute/path/to/zeva
 export PYTHONPATH=.
 
 CUDA_VISIBLE_DEVICES=0 python -u -m \
