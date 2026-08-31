@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Frozen-policy PIM adapter training for the verified Atomic-5 Stage-2 model."""
+"""Frozen-policy PIM training for RoboCasa Atomic-5 Zeva."""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ import copy
 
 from hydra.core.config_store import ConfigStore
 
-from cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva_stage2 import (
-    action_policy_robocasa365_atomic5_zeva_stage2,
+from cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva import (
+    action_policy_robocasa365_atomic5_zeva,
 )
 
 cs = ConfigStore.instance()
 
 action_policy_robocasa365_atomic5_zeva_pim = copy.deepcopy(
-    action_policy_robocasa365_atomic5_zeva_stage2
+    action_policy_robocasa365_atomic5_zeva
 )
 action_policy_robocasa365_atomic5_zeva_pim["job"].update(
     project="zeva",
@@ -28,12 +28,10 @@ zeva_policy.update(
     pim_memory_enabled=True,
     pim_persistent_length=4,
     pim_context_dim=256,
-    # Exact released-model bypass at initialization.
     pim_gate_init=0.0,
 )
 
-# Freeze the complete verified GRU/Stage-2/Cosmos path.  Only the newly added
-# prompt encoder, projection, and scalar gate receive gradients.
+# Train only the Causal Prompt encoder, projection, and scalar gate.
 keys = action_policy_robocasa365_atomic5_zeva_pim["optimizer"]["keys_to_select"]
 keys[:] = ["behavior_pim_encoder", "behavior_pim_projector", "behavior_pim_gate"]
 action_policy_robocasa365_atomic5_zeva_pim["optimizer"]["lr_multipliers"].update(

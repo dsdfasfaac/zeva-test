@@ -1,44 +1,46 @@
-# zeva inference overlay
+# zeva
 
-This repository contains the zeva code needed to serve the RoboCasa365 Atomic-5 policy with causal interaction extraction, dual-timescale memory, and in-context policy injection. It is an overlay for NVIDIA Cosmos Framework, not a standalone copy of the full framework.
+Official implementation of **zeva**, a causal interaction memory framework for
+robot manipulation.
 
-The released policy reached **195/250 (78.0%)** closed-loop success across five RoboCasa365 Atomic tasks using 30 denoising steps.
+Zeva extracts causal interaction states from observations and executed actions,
+maintains short- and long-term interaction memory, and conditions a frozen
+diffusion policy through a Causal Prompt.
 
-## Paper-aligned CTE and PIM extension
+## Architecture
 
-The current `main` branch exposes the paper-facing Zeva API under `cosmos_framework.model.zeva`:
+- **Causal Transition Encoder (CTE)** produces the phase representation
+  \(p_\tau\) and causal effect representation \(e_\tau\).
+- **Brief Interaction Trace (BIT)** stores recent effects within an attempt.
+- **Persistent Interaction Memory (PIM)** preserves interaction evidence across
+  attempts.
+- **Phase-Conditioned Retrieval** selects PIM entries relevant to the current
+  phase.
+- **Causal Prompt** fuses task context, phase, BIT, and PIM evidence.
+- **Policy Injection** conditions the frozen diffusion policy.
 
-- `CausalTransitionEncoder` (CTE) and `CausalTransitionEncoderConfig`;
-- `BriefInteractionTrace` (BIT);
-- `PersistentInteractionMemory` (PIM) and
-  `PhaseConditionedPIMRetrieval`;
-- `CausalPromptEncoder` and gated causal-prompt policy injection;
-- a PIM policy server and fixed-seed cross-attempt evaluator;
-- a PIM-shadow formal path that keeps PIM write/retrieval lifecycle active
-  while hard-gating its action residual off for frozen-policy regression tests.
+The implementation is available under
+[`cosmos_framework/model/zeva`](cosmos_framework/model/zeva).
 
-The serialized policy parameter keys remain compatible, and legacy CTE keys
-are deterministically remapped during strict loading; see
-[checkpoint compatibility](docs/checkpoint_compatibility.md). In same-process lifecycle
-off/on probes, PIM-shadow actions are bit-exact.
+## Results
 
-## What is included
+The released RoboCasa365 Atomic-5 model achieves **195/250 (78.0%)** success:
 
-- Stage-1 CTE definitions used to encode phase and causal-effect history;
-- static task-context retrieval head and bank lookup;
-- Causal Prompt construction and policy injection into the frozen policy;
-- the RoboCasa365 static-task-context policy server;
-- the matching causal-effect closed-loop evaluator (32-step execution by default);
-- the Atomic-5 inference/model configuration;
-- the RoboCasa365 target action statistics used by the dataset adapter;
-- the exact RoboCasa domain mapping (`robocasa-panda-omron` → model domain ID 22);
-- the exact evaluation contract and launch command.
+| Task | Success |
+| --- | ---: |
+| OpenStandMixerHead | 48/50 |
+| TurnOnElectricKettle | 45/50 |
+| CloseToasterOvenDoor | 38/50 |
+| TurnOnMicrowave | 47/50 |
+| CoffeeSetupMug | 17/50 |
 
-PIM configuration, serving/evaluation code, and compact
-verification utilities are included. Large checkpoints, datasets, evaluation
-videos, and machine-specific launch files are intentionally excluded.
+Evaluation uses seeds 195–244, a 32-action horizon, 30 UniPC steps, guidance
+3.0, shift 5.0, and no retries.
 
-## Install the overlay
+## Installation
+
+Zeva uses [NVIDIA Cosmos Framework](https://github.com/NVIDIA/cosmos-framework)
+at commit `ee58e41467f33c49ddde08b4d0ef4923876a95ac`.
 
 ```bash
 git clone https://github.com/NVIDIA/cosmos-framework.git
@@ -46,25 +48,23 @@ cd cosmos-framework
 git checkout ee58e41467f33c49ddde08b4d0ef4923876a95ac
 cd ..
 
-git clone https://github.com/dsdfasfaac/zeva-test.git zeva-inference
-rsync -a \
-  --exclude=.git \
-  --exclude=README.md \
-  zeva-inference/ cosmos-framework/
+git clone https://github.com/dsdfasfaac/zeva-test.git zeva
+rsync -a --exclude=.git --exclude=README.md zeva/ cosmos-framework/
 ```
 
-Install Cosmos Framework dependencies using the upstream instructions. Obtain the Stage2-5k model artifacts from:
+Install the Cosmos Framework dependencies following the upstream instructions.
 
-```text
-https://huggingface.co/chen123fu/zeva
-```
+## Models
 
-`ee58e41467f33c49ddde08b4d0ef4923876a95ac` is a public NVIDIA commit. The model repository is inference-only and contains the frozen policy shards, CTE/PIM assets, static task-context retrieval head, configs, checksums, and evaluation summary. Qwen, Wan VAE, and RoboCasa assets remain external dependencies under their own licenses.
+Model weights and evaluation artifacts are hosted at
+[chen123fu/zeva](https://huggingface.co/chen123fu/zeva).
 
-## Run inference
+## Reproduction
 
-See [the Stage2-5k inference and evaluation runbook](docs/zeva_robocasa_atomic5_stage2_5k.md). The published result requires the full 32-action chunk, left-agent plus wrist cameras at 256×512, fixed-base arm9 proprioception, and 30 denoising steps.
+- [78% RoboCasa365 evaluation](docs/reproduce.md)
+- [PIM and cross-attempt evaluation](docs/zeva_pim.md)
 
 ## License
 
-The overlay is distributed under the included OpenMDW-1.1 license. Preserve `LICENSE`, `NOTICE`, `ATTRIBUTIONS.md`, copyright notices, and notices of origin. External dependencies and model components may have additional terms.
+This repository is released under the included OpenMDW-1.1 license. External
+models, datasets, and simulators remain subject to their respective licenses.

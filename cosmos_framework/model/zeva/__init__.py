@@ -6,7 +6,7 @@
 from .brief_interaction_trace import BriefInteractionTrace
 from .causal_prompt import CausalPromptConfig, CausalPromptEncoder, inject_causal_prompt
 from .causal_transition_encoder import CausalTransitionEncoder, CausalTransitionEncoderConfig
-from .checkpoint_compat import remap_legacy_cte_state_dict
+from .checkpoint_io import normalize_cte_state_dict
 from .cte_losses import CTELossConfig, causal_transition_encoder_loss
 from .persistent_interaction_memory import (
     PIMMemoryEntry,
@@ -48,5 +48,5 @@ __all__ = [
     "CausalPromptConfig",
     "CausalPromptEncoder",
     "inject_causal_prompt",
-    "remap_legacy_cte_state_dict",
+    "normalize_cte_state_dict",
 ]

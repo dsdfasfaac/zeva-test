@@ -91,21 +91,22 @@ def test_controller_does_not_commit_incomplete_replan() -> None:
 
 
 def test_robocasa_atomic5_contract_is_arm7_and_temporally_bounded() -> None:
-    schema = make_robocasa_atomic5_schema(vbe_hash="vbe", vae_temporal_hash="vae")
+    schema = make_robocasa_atomic5_schema(cte_hash="cte", vae_temporal_hash="vae")
     assert schema.action_dim == 7
     assert schema.action_horizon == 16
     assert schema.capacity == 64
     assert schema.top_k == 4
     # The provenance fields participate in the hash; a cache from another
-    # Stage-1/VAE contract cannot be accepted by the runtime.
-    assert schema.hash != make_robocasa_atomic5_schema(vbe_hash="other", vae_temporal_hash="vae").hash
+    # A different CTE/VAE contract cannot be accepted by the runtime.
+    assert schema.hash != make_robocasa_atomic5_schema(cte_hash="other", vae_temporal_hash="vae").hash
 
 
 def test_robocasa_controller_writes_only_after_completed_window() -> None:
     schema = make_robocasa_atomic5_schema()
     controller = TransitionMemoryController(schema, enabled=True)
     controller.reset("OpenStandMixerHead")
-    zeros = lambda shape: torch.zeros(shape)
+    def zeros(shape: tuple[int, ...]) -> torch.Tensor:
+        return torch.zeros(shape)
     controller.begin_replan()
     controller.read(zeros((128,)), zeros((128,)))
     assert not controller.complete_replan(

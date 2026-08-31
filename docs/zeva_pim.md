@@ -1,131 +1,99 @@
-# Zeva CTE, BIT, PIM, and Causal Prompt implementation
+# Persistent Interaction Memory
 
-This path adds paper-aligned Persistent Interaction Memory (PIM) without
-changing the released GRU Stage-2 policy path. PIM is episode-scoped, survives
-attempt boundaries, accepts only completed 16-control effects, merges by
-phase/effect similarity, and retrieves Top-K evidence using the current phase.
+Zeva uses two interaction memories:
 
-## Paper terminology and public API
+- **Brief Interaction Trace (BIT)** retains recent causal effects inside the
+  current attempt.
+- **Persistent Interaction Memory (PIM)** retains completed interaction evidence
+  across attempts and retrieves it with the current phase representation.
 
-New integrations should use the paper-facing names below. Historical names
-remain available only for checkpoint and script compatibility; changing these
-aliases does not rename any state-dict key.
+PIM entries contain a phase, a causal effect, an attempt ID, and an observation
+count. Similar entries are merged; retrieval returns the top phase-matched
+evidence for Causal Prompt construction.
 
-| Paper term | Public code name | Compatible historical name |
-| --- | --- | --- |
-| Causal Transition Encoder (CTE) | `CausalTransitionEncoder` | canonical implementation |
-| phase representation | `phase` / `phase_head` | unchanged |
-| effect representation | `effect_pre`, `effect_post` | unchanged |
-| Brief Interaction Trace (BIT) | `BriefInteractionTrace` | `effects` + `valid` tensors |
-| Persistent Interaction Memory (PIM) | `PersistentInteractionMemory` | external `_pim` runtime handle |
-| PIM memory entry | `PIMMemoryEntry` | `PersistentInteractionEntry` |
-| phase-conditioned retrieval | `PhaseConditionedPIMRetrieval` / `query_phase()` | direct `query_tensors()` calls |
-| causal prompt / \(F_{mem}\) | `CausalPromptEncoder` / `PromptMemoryFusion` | `PersistentInteractionPromptEncoder` |
-| policy injection | `inject_causal_prompt()` | `add_gated_pim_residual()` |
-| frozen policy | `OmniMoTModel` / `Cosmos3VFMNetwork` | framework-native model names |
+## Model components
 
-`StaticTaskContextRetrievalHead` remains **static task-context retrieval**. It
-must not be described as PIM retrieval: it queries a frozen training bank from
-the initial observation and instruction, whereas
-`PhaseConditionedPIMRetrieval` queries same-episode interaction evidence using
-the current phase.
+| Paper component | Implementation |
+| --- | --- |
+| Causal Transition Encoder | `CausalTransitionEncoder` |
+| Phase representation | `phase_head` / `phase` |
+| Causal effect | `effect_pre` / `effect_post` |
+| Brief Interaction Trace | `BriefInteractionTrace` |
+| Persistent Interaction Memory | `PersistentInteractionMemory` |
+| Phase-Conditioned Retrieval | `PhaseConditionedPIMRetrieval` |
+| Causal Prompt | `CausalPromptEncoder` |
+| Policy Injection | `CausalPromptPolicyAdapter` |
 
-The retrieved interaction evidence is projected into the existing global
-task-context prefix through `tanh(gate)`. The gate starts at exactly zero, so the
-untrained PIM checkpoint has the same prefix and token layout as the verified
-frozen policy. Training freezes the foundation policy, CTE, policy-injection prior, and existing
-existing task-context projector. The released DCP keeps three legacy serialized
-parameter prefixes for checkpoint compatibility; public code calls them the
-Causal Prompt encoder, projector, and gate.
+## Start a PIM policy server
 
-## 1. Build phase/effect support for short training
-
-Use the memory bank and feature cache from the same GRU Stage-1 lineage:
+Set the release and dependency paths:
 
 ```bash
-export ZEVA_TASK_CONTEXT_BANK=/path/to/train_memory_effect_v3.pt
-export ZEVA_CTE_FEATURE_CACHE=/path/to/stage2_effect_feature_cache_v3
-export ZEVA_PIM_TRAINING_BANK=/path/to/persistent_effect_bank_gru.pt
-
-PYTHONPATH=. python -m \
-  cosmos_framework.scripts.build_robocasa_persistent_effect_bank \
-  --memory-bank "$ZEVA_TASK_CONTEXT_BANK" \
-  --feature-cache "$ZEVA_CTE_FEATURE_CACHE" \
-  --output "$ZEVA_PIM_TRAINING_BANK"
+export ZEVA_RELEASE=/absolute/path/to/zeva
+export ZEVA_PIM_CHECKPOINT=/absolute/path/to/iter_000000500
+export WAN_VAE_PATH=/absolute/path/to/Wan2.2_VAE.pth
+export PYTHONPATH=.
 ```
 
-Each training query excludes its own trajectory and retrieves same-task
-support by current-phase cosine similarity. This matches runtime
-phase-conditioned PIM retrieval and avoids leaking future effects from the
-target trajectory.
-
-## 2. Run the frozen-policy adapter training
-
-Set `BASE_CHECKPOINT_PATH` to the verified GRU Stage-2 iter-5k DCP, then:
+Start the server with a Zeva-PIM checkpoint:
 
 ```bash
-export ROBOCASA365_ROOT=/path/to/robocasa365/target
-export BASE_CHECKPOINT_PATH=/path/to/stage2_iter_000005000
-export QWEN_VLM_PATH=/path/to/Qwen3-VL-8B-Instruct
-export WAN_VAE_PATH=/path/to/Wan2.2_VAE.pth
-export ZEVA_TASK_CONTEXT_BANK=/path/to/train_memory_effect_v3.pt
-export ZEVA_CTE_FEATURE_CACHE=/path/to/stage2_effect_feature_cache_v3
-export ZEVA_PIM_TRAINING_BANK=/path/to/persistent_effect_bank_gru.pt
-
-bash examples/launch_sft_action_policy_robocasa365_atomic5_zeva_pim.sh
-```
-
-The default recipe is deliberately short: 500 updates with checkpoints every
-100 updates. Select the checkpoint by paired closed-loop validation; do not
-assume the last checkpoint is best.
-
-## 3. Validate no-regression before conditioning
-
-First run PIM in shadow mode on the original Stage-2 checkpoint. The server
-builds and retrieves PIM, but sends an empty validity mask, so actions remain
-on the original model path:
-
-```bash
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0 python -u -m \
+CUDA_VISIBLE_DEVICES=0 python -u -m \
   cosmos_framework.scripts.action_policy_server_robocasa365_zeva_pim \
-  --checkpoint-path "$BASE_CHECKPOINT_PATH" --allow-dcp-checkpoint \
-  --experiment action_policy_robocasa365_atomic5_zeva_stage2 \
+  --checkpoint-path "$ZEVA_PIM_CHECKPOINT" \
+  --allow-dcp-checkpoint \
+  --experiment action_policy_robocasa365_atomic5_zeva_pim_inference \
   --experiment-overrides model.config.tokenizer.vae_path="$WAN_VAE_PATH" \
-  --task-context-bank "$ZEVA_TASK_CONTEXT_BANK" \
-  --cte-checkpoint /path/to/cte_step_000500.pt \
-  --static-task-context-checkpoint /path/to/static_task_context/best.pt \
-  --pim-shadow --pim-top-k 4 \
+  --task-context-bank \
+    "$ZEVA_RELEASE/weights/stage1/train_memory_effect_v3.pt" \
+  --cte-checkpoint \
+    "$ZEVA_RELEASE/weights/stage1/cte_step_000500.pt" \
+  --static-task-context-checkpoint \
+    "$ZEVA_RELEASE/weights/stage3_iter_000005000/best.pt" \
+  --pim-enabled --pim-top-k 4 \
+  --pim-success-replay-enabled \
   --num-steps 30 --guidance 3.0 --shift 5.0 \
   --action-dim 7 --action-chunk-size 32 --conditioning-fps 20 \
-  --image-height 256 --image-width 512 --no-use-state --history-length 0 \
-  --port 8300
+  --image-height 256 --image-width 512 \
+  --no-use-state --history-length 0 \
+  --host 0.0.0.0 --port 8300
 ```
 
-For learned conditioning, change the checkpoint and experiment to the PIM
-adapter checkpoint and
-`action_policy_robocasa365_atomic5_zeva_pim_inference`, replace
-`--pim-shadow` with `--pim-enabled`, and keep all other inference settings
-paired. Do not use the training experiment for serving: its warm-start skip
-list intentionally omits PIM weights when loading the old Stage-2 checkpoint.
+Use `--pim-shadow` instead of `--pim-enabled` to execute PIM lifecycle and
+retrieval without injecting the retrieved evidence into policy actions.
 
-Before enabling PIM, also serve that trained adapter checkpoint with neither
-PIM flag. Its PIM validity mask is empty, so paired requests must reproduce the
-frozen Stage-2 action output. This checks both the checkpoint loader and the
-zero-memory bypass, whereas shadow mode alone checks only the runtime memory
-lifecycle.
-
-Evaluate repeated attempts on one fixed environment seed:
+## Fixed-seed cross-attempt evaluation
 
 ```bash
-PYTHONPATH=. python -m \
-  cosmos_framework.scripts.eval_zeva_robocasa365_pim \
-  --task TurnOnMicrowave --host 127.0.0.1 --port 8300 \
-  --episodes 10 --seed 195 --seed-mode fixed \
-  --expect-memory-conditioning on \
-  --output-dir /path/to/pim_eval/TurnOnMicrowave_seed195 --no-video
+python -m cosmos_framework.scripts.eval_zeva_robocasa365_pim \
+  --task TurnOnElectricKettle \
+  --host 127.0.0.1 --port 8300 \
+  --episodes 6 --seed 197 --seed-mode fixed \
+  --expect-pim-conditioning on \
+  --output-dir results/kettle_seed197 --no-video
 ```
 
-Use `--expect-memory-conditioning off` for shadow/no-memory runs. Report both
-attempt-0 success (regression guard) and success versus attempt index (PIM
-self-evolution evidence); the independent-seed 78% result is not evidence for
-cross-attempt improvement.
+The fixed seed preserves the task instance while the attempt ID increases.
+Success replay is activated only after PIM has observed a successful attempt.
+
+## Reproducible case studies
+
+Each sequence was reproduced twice from empty PIM. `F` denotes failure and `S`
+denotes success.
+
+| Task | Seed | Attempts |
+| --- | ---: | --- |
+| OpenStandMixerHead | 199 | `FSSSS` |
+| TurnOnElectricKettle | 197 | `FSSSSS` |
+| CloseToasterOvenDoor | 199 | `FFFSSSSSSSS` |
+| TurnOnMicrowave | 200 | `FFFFSSSS` |
+| CoffeeSetupMug | 204 | `FFFFFFFFFSSSS` |
+
+Validate an exported case-study pair with:
+
+```bash
+python experiment_manifests/verify_pim_evolve_case.py \
+  --first /path/to/first_run \
+  --repeat /path/to/repeat_run \
+  --task TurnOnElectricKettle --seed 197
+```

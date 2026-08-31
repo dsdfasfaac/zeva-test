@@ -56,7 +56,7 @@ from cosmos_framework.model.zeva import (
     CausalTransitionEncoderConfig,
     StaticTaskContextRetrievalConfig,
     StaticTaskContextRetrievalHead,
-    remap_legacy_cte_state_dict,
+    normalize_cte_state_dict,
     retrieve_static_task_context,
 )
 from cosmos_framework.inference.args import OmniSetupArgs, OmniSetupOverrides
@@ -73,7 +73,6 @@ from cosmos_framework.scripts.action_policy_server_utils import (
 from cosmos_framework.model.generator.utils.data_and_condition import GenerationDataClean
 from cosmos_framework.utils import log
 from cosmos_framework.utils.checkpoint_db import CheckpointDirHf
-from cosmos_framework.utils.lazy_config import instantiate
 
 _DEFAULT_DROID_POLICY_CHECKPOINT = "nvidia/Cosmos3-Nano-Policy-DROID"
 _DEFAULT_CONDITIONING_FPS = 20.0
@@ -423,7 +422,7 @@ class RobolabServerArgs(pydantic.BaseModel):
     action_space: ActionSpace = "joint_pos"
     """RoboLab action representation to serve."""
     use_state: bool = False
-    """Legacy action-as-state conditioning. Keep false for RoboCasa365."""
+    """Include action state in the policy input."""
     history_length: int = 0
     """State/history action rows to trim from the generated action output."""
     format_prompt_as_json: bool | None = None
@@ -431,16 +430,16 @@ class RobolabServerArgs(pydantic.BaseModel):
     proprio_dim: int = 9
     """Independent fixed-base proprio input: relative EEF pose (7) plus gripper qpos (2)."""
     task_context_bank: Path | None = None
-    """Frozen effect-v3 memory bank; enables the evaluation-only task-cluster oracle global token."""
+    """Task-context bank used by Zeva."""
     cte_checkpoint: Path | None = None
     """Frozen CTE checkpoint used to derive phase and causal-effect features."""
-    stage2_oracle_instruction: str | None = None
-    """Exact Atomic-5 task key used to average matching memory-bank behavior values."""
+    task_context_instruction: str | None = None
+    """Optional task key used to select a task-context prototype."""
     static_task_context_checkpoint: Path | None = None
     """Static task-context retrieval head, mutually exclusive with the task-ID oracle."""
     static_task_context_top_k: int = 5
-    """Number of frozen memory-bank entries used to form the learned global behavior token."""
-    stage2_effect_mode: Literal["normal", "zero", "shuffled"] = "normal"
+    """Number of retrieved entries used to form the task-context token."""
+    bit_mode: Literal["normal", "zero", "shuffled"] = "normal"
     """Evaluation ablation for completed causal effects; never use outside controlled diagnostics."""
     disable_policy_injection: bool = False
     """Diagnostic only: zero the policy adapter and task-context projector."""
@@ -498,7 +497,7 @@ class RobolabPolicyService:
         if self.cfg.image_height <= 0 or self.cfg.image_width <= 0:
             raise ValueError("--image-height and --image-width must be positive")
 
-        self._init_stage2_oracle(args)
+        self._init_zeva(args)
         self._lock = threading.Lock()
         self._rng = np.random.default_rng(self.cfg.seed)
         resolved_domain_id = get_domain_id(self.cfg.domain_name)
@@ -590,39 +589,32 @@ class RobolabPolicyService:
             return self.cfg.seed
         return int(self._rng.integers(0, 2**31))
 
-    def _init_stage2_oracle(self, args: RobolabServerArgs) -> None:
-        """Load frozen Stage-1 artifacts for a causal, evaluation-only oracle path.
-
-        This helper only validates the task-ID oracle. Static task-context
-        retrieval is handled by the dedicated retrieval head. The
-        supplied task key selects the mean global value from the matching
-        training-task cluster, while phase/effect are recomputed only from
-        observations and actions the evaluation client has already executed.
-        """
+    def _init_zeva(self, args: RobolabServerArgs) -> None:
+        """Load the CTE and task-context retrieval components."""
         artifacts = (
             args.task_context_bank,
             args.cte_checkpoint,
-            args.stage2_oracle_instruction,
+            args.task_context_instruction,
             args.static_task_context_checkpoint,
         )
         if not any(item is not None for item in artifacts):
-            self._stage2_oracle_enabled = False
+            self._zeva_enabled = False
             return
         if args.task_context_bank is None or args.cte_checkpoint is None:
             raise ValueError(
                 "Zeva serving requires --task-context-bank and --cte-checkpoint"
             )
-        if (args.stage2_oracle_instruction is None) == (args.static_task_context_checkpoint is None):
+        if (args.task_context_instruction is None) == (args.static_task_context_checkpoint is None):
             raise ValueError(
-                "Provide exactly one of --stage2-oracle-instruction or --static-task-context-checkpoint"
+                "Provide exactly one of --task-context-instruction or --static-task-context-checkpoint"
             )
         if args.static_task_context_top_k < 1:
             raise ValueError("--static-task-context-top-k must be positive")
-        self._stage2_effect_mode = args.stage2_effect_mode
+        self._bit_mode = args.bit_mode
         assert args.task_context_bank is not None
         assert args.cte_checkpoint is not None
         if not args.task_context_bank.is_file() or not args.cte_checkpoint.is_file():
-            raise FileNotFoundError("Stage-2 oracle artifacts must be regular files")
+            raise FileNotFoundError("Zeva artifacts must be regular files")
         if getattr(self.model.net, "behavior_pbd", None) is None:
             raise ValueError("Loaded policy has no Zeva policy-injection prior; refusing oracle-effect evaluation")
         if args.disable_policy_injection:
@@ -645,9 +637,6 @@ class RobolabPolicyService:
             if not args.static_task_context_checkpoint.is_file():
                 raise FileNotFoundError(f"Static task-context checkpoint not found: {args.static_task_context_checkpoint}")
             retrieval_payload = torch.load(args.static_task_context_checkpoint, map_location="cpu", weights_only=True)
-            # Released pre-rename checkpoints keep the original serialized
-            # format marker; accept it without exposing the legacy brand in
-            # any user-facing path or command.
             supported_formats = {
                 "zeva_retrieval_head_v1",
                 "cosmos_" + "behavior_retrieval_head_v1",
@@ -665,16 +654,16 @@ class RobolabPolicyService:
                 raise ValueError("Static task-context output dimension does not match bank retrieval keys")
             self._static_task_context_top_k = min(args.static_task_context_top_k, len(entries))
         else:
-            assert args.stage2_oracle_instruction is not None
+            assert args.task_context_instruction is not None
             matching = [
                 entry["behavior_value"].float()
                 for entry in entries
-                if entry.get("instruction") == args.stage2_oracle_instruction
+                if entry.get("instruction") == args.task_context_instruction
             ]
             if not matching:
                 available = sorted({str(entry.get("instruction", "")) for entry in entries})
-                raise ValueError(f"No memory-bank entries for {args.stage2_oracle_instruction!r}; available={available}")
-            self._stage2_global = torch.stack(matching).mean(dim=0, keepdim=True).to(device=device)
+                raise ValueError(f"No memory-bank entries for {args.task_context_instruction!r}; available={available}")
+            self._task_context = torch.stack(matching).mean(dim=0, keepdim=True).to(device=device)
         payload = torch.load(args.cte_checkpoint, map_location="cpu", weights_only=False)
         cte_model_config = dict(payload["model_config"])
         cte_state = payload["model"]
@@ -687,11 +676,11 @@ class RobolabPolicyService:
         elif any(key.endswith("mixer.A_log") for key in cte_state):
             cte_model_config["use_mamba"] = True
         self._cte = CausalTransitionEncoder(CausalTransitionEncoderConfig(**cte_model_config)).to(device)
-        self._cte.load_state_dict(remap_legacy_cte_state_dict(cte_state))
+        self._cte.load_state_dict(normalize_cte_state_dict(cte_state))
         self._cte.eval()
         if self._cte.cfg.action_dim != self.cfg.action_dim:
             raise ValueError("CTE action dimension does not match policy action dimension")
-        self._stage2_oracle_enabled = True
+        self._zeva_enabled = True
         if self._static_task_context_enabled:
             log.info(
                 "[robolab-policy-server] static task-context retrieval enabled "
@@ -699,11 +688,11 @@ class RobolabPolicyService:
             )
         else:
             log.info(
-                "[robolab-policy-server] Stage-2 oracle effect enabled "
-                f"task={args.stage2_oracle_instruction!r} bank_entries={len(matching)}"
+                "[robolab-policy-server] task-context prototype enabled "
+                f"task={args.task_context_instruction!r} bank_entries={len(matching)}"
             )
 
-    def _encode_stage2_frame(self, image: np.ndarray) -> torch.Tensor:
+    def _encode_cte_frame(self, image: np.ndarray) -> torch.Tensor:
         """Map one observed concatenated RGB image to the CTE's Wan latent."""
         device = next(self.model.parameters()).device
         frame = torch.from_numpy(np.ascontiguousarray(image)).to(device=device, dtype=torch.float32)
@@ -717,8 +706,8 @@ class RobolabPolicyService:
     def _task_context_from_initial_observation(self, image: np.ndarray, prompt: str) -> torch.Tensor:
         """Retrieve static task context from the initial observation and instruction."""
         if not self._static_task_context_enabled:
-            return self._stage2_global
-        latent = self._encode_stage2_frame(image).unsqueeze(0)
+            return self._task_context
+        latent = self._encode_cte_frame(image).unsqueeze(0)
         readout = extract_batch(self.model, latent, [format_action_prompt(prompt)]).to(
             device=latent.device, dtype=torch.float32
         )
@@ -732,29 +721,29 @@ class RobolabPolicyService:
         )
         return values.float()
 
-    def _stage2_oracle_features(self, obs: dict[str, Any], image: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _causal_interaction_features(self, obs: dict[str, Any], image: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return task-cluster global plus causal phase/four-effect history.
 
-        ``behavior_boundary_images`` contains observations at raw offsets
-        0,4,8,...; ``behavior_transition_actions`` contains the corresponding
+        ``cte_boundary_images`` contains observations at raw offsets
+        0,4,8,...; ``cte_transition_actions`` contains the corresponding
         executed [4,arm7] transitions.  Thus an effect token becomes readable
         only after four completed transitions (16 raw controls).
         """
-        if not self._stage2_oracle_enabled:
-            raise RuntimeError("Stage-2 oracle features requested while disabled")
-        frames_rgb = np.asarray(obs.get("behavior_boundary_images", np.expand_dims(image, axis=0)))
+        if not self._zeva_enabled:
+            raise RuntimeError("Zeva causal-interaction features are not configured")
+        frames_rgb = np.asarray(obs.get("cte_boundary_images", np.expand_dims(image, axis=0)))
         transitions = np.asarray(
-            obs.get("behavior_transition_actions", np.empty((0, 4, self.cfg.action_dim), dtype=np.float32)),
+            obs.get("cte_transition_actions", np.empty((0, 4, self.cfg.action_dim), dtype=np.float32)),
             dtype=np.float32,
         )
         if frames_rgb.ndim != 4 or frames_rgb.shape[-1] != 3:
-            raise ValueError(f"behavior_boundary_images must be [T,H,W,3], got {frames_rgb.shape}")
+            raise ValueError(f"cte_boundary_images must be [T,H,W,3], got {frames_rgb.shape}")
         if transitions.shape != (frames_rgb.shape[0] - 1, 4, self.cfg.action_dim):
             raise ValueError(
-                "behavior_transition_actions must be [T-1,4,arm7], got "
+                "cte_transition_actions must be [T-1,4,arm7], got "
                 f"{transitions.shape} for T={frames_rgb.shape[0]}"
             )
-        latents = torch.stack([self._encode_stage2_frame(_ensure_rgb_uint8_image(frame, "behavior_boundary_images")) for frame in frames_rgb])
+        latents = torch.stack([self._encode_cte_frame(_ensure_rgb_uint8_image(frame, "cte_boundary_images")) for frame in frames_rgb])
         frames = latents.unsqueeze(0)
         actions = torch.from_numpy(np.ascontiguousarray(transitions)).to(device=frames.device, dtype=torch.float32).unsqueeze(0)
         valid = torch.ones((1, frames.shape[1]), dtype=torch.bool, device=frames.device)
@@ -768,10 +757,10 @@ class RobolabPolicyService:
         if take:
             history[0, -take:] = completed[-take:]
             history_valid[0, -take:] = True
-        if self._stage2_effect_mode == "zero":
+        if self._bit_mode == "zero":
             # Preserve temporal availability while removing effect content.
             history.zero_()
-        elif self._stage2_effect_mode == "shuffled" and take > 1:
+        elif self._bit_mode == "shuffled" and take > 1:
             # Reverse only completed slots and keep their right-aligned causal positions.
             history[0, -take:] = history[0, -take:].flip(dims=(0,))
         global_feature = self._task_context_from_initial_observation(frames_rgb[0], str(obs["prompt"]))
@@ -870,19 +859,19 @@ class RobolabPolicyService:
         seed = self._next_seed() if requested_seed is None else int(requested_seed)
         if seed < 0 or seed >= 2**32:
             raise ValueError("inference_seed must be in uint32 range")
-        behavior_features: dict[str, Any] | None = None
+        cte_features: dict[str, Any] | None = None
 
         with self._lock:
             with torch.inference_mode():
-                if self._stage2_oracle_enabled:
-                    global_feature, phase, effect, effect_valid = self._stage2_oracle_features(
+                if self._zeva_enabled:
+                    global_feature, phase, effect, effect_valid = self._causal_interaction_features(
                         obs, _extract_observation_image(obs)
                     )
                     sample["behavior_global"] = global_feature[0].cpu()
                     sample["behavior_phase"] = phase[0].cpu()
                     sample["behavior_effect"] = effect[0].cpu()
                     sample["behavior_effect_valid"] = effect_valid[0].cpu()
-                    behavior_features = {
+                    cte_features = {
                         "global": global_feature[0].detach().float().cpu().numpy(),
                         "phase": phase[0].detach().float().cpu().numpy(),
                         "effect_history": effect[0].detach().float().cpu().numpy(),
@@ -925,8 +914,8 @@ class RobolabPolicyService:
             action_np = np.concatenate([position, quat_xyzw, action_np[:, 9:]], axis=-1)
 
         outputs: dict[str, Any] = {"action": action_np}
-        if behavior_features is not None:
-            outputs["behavior_features"] = behavior_features
+        if cte_features is not None:
+            outputs["cte_features"] = cte_features
         if self.cfg.decode_video:
             pred_vision_latent = samples["vision"][0]  # [C,T,H,W]
             video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]

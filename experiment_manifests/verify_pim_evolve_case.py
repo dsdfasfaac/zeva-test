@@ -34,7 +34,7 @@ def _load_attempts(root: Path) -> list[dict[str, Any]]:
 def _replay_count(row: dict[str, Any]) -> int:
     return sum(
         bool(query.get("replay_applied"))
-        for query in row.get("online_memory_queries", [])
+        for query in row.get("pim_queries", [])
     )
 
 

@@ -22,7 +22,7 @@ import torch.nn.functional as F
 class TransitionMemorySchema:
     """Dimensions and temporal contract used by one memory session."""
 
-    version: str = "arx_online_memory_v1"
+    version: str = "arx_transition_memory_v1"
     task_contract: str = "arx_task7_model_a_5task"
     phase_dim: int = 128
     visual_key_dim: int = 128
@@ -31,7 +31,7 @@ class TransitionMemorySchema:
     action_horizon: int = 16
     capacity: int = 64
     top_k: int = 4
-    vbe_hash: str = ""
+    cte_hash: str = ""
     vae_temporal_hash: str = ""
 
     @property
@@ -100,7 +100,7 @@ class TransitionMemory:
     def _validate(self, transition: TransitionRecord) -> None:
         if transition.schema_hash != self.schema.hash:
             raise ValueError(
-                "online memory schema mismatch: "
+                "transition memory schema mismatch: "
                 f"got {transition.schema_hash}, expected {self.schema.hash}"
             )
         if transition.phase.shape != (self.schema.phase_dim,):
@@ -116,7 +116,7 @@ class TransitionMemory:
         if transition.next_phase.shape != (self.schema.phase_dim,):
             raise ValueError("next_phase has an invalid shape")
         if not transition.valid:
-            raise ValueError("invalid or incomplete transitions must not enter online memory")
+            raise ValueError("invalid or incomplete transitions must not enter transition memory")
 
     def append(self, transition: TransitionRecord) -> None:
         """Append one completed transition, resetting on a task change."""

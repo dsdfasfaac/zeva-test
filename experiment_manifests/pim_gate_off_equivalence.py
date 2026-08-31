@@ -99,24 +99,24 @@ def main() -> None:
         reset = env.reset()
         obs = reset[0] if isinstance(reset, tuple) else reset
         request, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-        request["behavior_boundary_images"] = np.expand_dims(
+        request["cte_boundary_images"] = np.expand_dims(
             request["observation/image"].copy(), axis=0
         )
-        request["behavior_transition_actions"] = np.empty((0, 4, 7), dtype=np.float32)
-        request["behavior_reset"] = True
+        request["cte_transition_actions"] = np.empty((0, 4, 7), dtype=np.float32)
+        request["cte_reset"] = True
         request["inference_seed"] = 0
         request.update(
             {
-                "online_session_id": f"gateoff-equivalence:{args.task}:{args.seed}",
-                "online_task_cluster": args.task,
-                "online_environment_seed": args.seed,
-                "online_attempt_id": 0,
-                "online_memory_reset": True,
-                "online_replan_reset": False,
-                "online_latent_index": 0,
-                "online_replan_index": 0,
-                "online_executed_action": np.empty((0, 7), dtype=np.float32),
-                "online_transition_complete": False,
+                "pim_session_id": f"gateoff-equivalence:{args.task}:{args.seed}",
+                "pim_task_cluster": args.task,
+                "pim_environment_seed": args.seed,
+                "pim_attempt_id": 0,
+                "pim_memory_reset": True,
+                "pim_replan_reset": False,
+                "pim_latent_index": 0,
+                "pim_replan_index": 0,
+                "pim_executed_action": np.empty((0, 7), dtype=np.float32),
+                "pim_transition_complete": False,
             }
         )
 
@@ -150,8 +150,8 @@ def main() -> None:
         (float(np.abs(pim - value).max()) for value in pim_runs[1:]), default=0.0
     )
     feature_comparison = {}
-    base_features = base_outputs[0].get("behavior_features", {})
-    pim_features = pim_outputs[0].get("behavior_features", {})
+    base_features = base_outputs[0].get("cte_features", {})
+    pim_features = pim_outputs[0].get("cte_features", {})
     for name in sorted(set(base_features) & set(pim_features)):
         base_value = np.asarray(base_features[name])
         pim_value = np.asarray(pim_features[name])
@@ -179,8 +179,8 @@ def main() -> None:
         "base_endpoint": f"{base_host}:{args.base_port}",
         "pim_endpoint": f"{pim_host}:{args.pim_port}",
         "base_skip_pim_lifecycle": args.base_skip_pim_lifecycle,
-        "base_phase0_contract": base_outputs[0].get("phase0_contract"),
-        "pim_phase0_contract": pim_outputs[0].get("phase0_contract"),
+        "base_zeva_contract": base_outputs[0].get("zeva_contract"),
+        "pim_zeva_contract": pim_outputs[0].get("zeva_contract"),
         "pim_metadata_present": isinstance(pim_outputs[0].get("pim"), dict),
         "base_shape": list(base.shape),
         "pim_shape": list(pim.shape),
@@ -193,7 +193,7 @@ def main() -> None:
         "repeat_each": args.repeat_each,
         "base_repeat_max_abs_delta": base_repeat_delta,
         "pim_repeat_max_abs_delta": pim_repeat_delta,
-        "behavior_feature_comparison": feature_comparison,
+        "cte_feature_comparison": feature_comparison,
         "finite": bool(np.isfinite(base).all() and np.isfinite(pim).all()),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

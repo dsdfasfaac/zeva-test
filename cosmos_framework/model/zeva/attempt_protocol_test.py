@@ -4,24 +4,24 @@ import pytest
 
 from cosmos_framework.model.zeva.attempt_protocol import (
     EFFECT_ACTION_HORIZON,
-    EFFECT_VBE_TRANSITIONS,
+    EFFECT_CTE_TRANSITIONS,
     EXECUTED_ACTION_HORIZON,
     PREDICTED_ACTION_HORIZON,
     REQUIRED_WARMUP_REQUESTS,
-    VBE_TRANSITION_ACTION_HORIZON,
+    CTE_TRANSITION_ACTION_HORIZON,
     AttemptSessionKey,
     default_session_id,
     inference_seed,
 )
 
 
-def test_phase0_temporal_contract_is_exact() -> None:
+def test_zeva_temporal_contract_is_exact() -> None:
     assert PREDICTED_ACTION_HORIZON == 32
     assert EXECUTED_ACTION_HORIZON == 16
     assert EFFECT_ACTION_HORIZON == 16
-    assert VBE_TRANSITION_ACTION_HORIZON == 4
-    assert EFFECT_VBE_TRANSITIONS == 4
-    assert VBE_TRANSITION_ACTION_HORIZON * EFFECT_VBE_TRANSITIONS == EFFECT_ACTION_HORIZON
+    assert CTE_TRANSITION_ACTION_HORIZON == 4
+    assert EFFECT_CTE_TRANSITIONS == 4
+    assert CTE_TRANSITION_ACTION_HORIZON * EFFECT_CTE_TRANSITIONS == EFFECT_ACTION_HORIZON
     assert REQUIRED_WARMUP_REQUESTS == 1
 
 

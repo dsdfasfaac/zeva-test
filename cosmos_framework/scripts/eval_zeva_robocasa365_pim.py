@@ -47,7 +47,7 @@ except ModuleNotFoundError:
     )
 
 try:
-    from cosmos_framework.model.zeva.phase1_attempt_schema import (
+    from cosmos_framework.model.zeva.attempt_artifacts import (
         ATTEMPT_RECORD_VERSION,
         CHUNK_RECORD_VERSION,
         sha256_file,
@@ -55,7 +55,7 @@ try:
         write_manifest,
     )
 except ModuleNotFoundError:
-    from phase1_attempt_schema import (  # type: ignore[no-redef]
+    from attempt_artifacts import (  # type: ignore[no-redef]
         ATTEMPT_RECORD_VERSION,
         CHUNK_RECORD_VERSION,
         sha256_file,
@@ -240,11 +240,11 @@ def restore_session_from_artifacts(
             success_trace_attempt_id = int(record["attempt_id"])
     n = len(restored["phase"])
     request = {
-        "online_restore_session": True,
-        "online_session_id": session_id,
-        "online_task_cluster": task_cluster,
-        "online_environment_seed": environment_seed,
-        "online_last_attempt_id": int(records[-1]["attempt_id"]),
+        "pim_restore_session": True,
+        "pim_session_id": session_id,
+        "pim_task_cluster": task_cluster,
+        "pim_environment_seed": environment_seed,
+        "pim_last_attempt_id": int(records[-1]["attempt_id"]),
         "restore_phase": np.asarray(restored["phase"], dtype=np.float32).reshape(n, 128),
         "restore_visual_key": np.asarray(restored["visual_key"], dtype=np.float32).reshape(n, 128),
         "restore_effect_post": np.asarray(restored["effect_post"], dtype=np.float32).reshape(n, 128),
@@ -264,7 +264,7 @@ def restore_session_from_artifacts(
         "restore_success_trace_action_count": success_trace_action_count,
         "restore_success_trace_attempt_id": success_trace_attempt_id,
     }
-    output = client.infer(request).get("online_restore")
+    output = client.infer(request).get("pim_restore")
     if not isinstance(output, dict) or int(output.get("restored_transitions", -1)) != n:
         raise ValueError("policy server did not acknowledge the exact restored transition count")
     return output
@@ -307,7 +307,7 @@ def main() -> None:
         "--open-loop-steps",
         type=int,
         default=EXECUTED_ACTION_HORIZON,
-        help="Controls executed from each 32-step Cosmos chunk; 16 is the online-memory contract.",
+        help="Controls executed from each 32-step policy chunk; 16 is the PIM contract.",
     )
     parser.add_argument(
         "--seed-mode",
@@ -322,18 +322,21 @@ def main() -> None:
         help="Base for the explicit attempt/replan inference-seed schedule used by paired conditions.",
     )
     parser.add_argument(
-        "--expect-memory-conditioning",
+        "--expect-pim-conditioning",
+        dest="expect_pim_conditioning",
         choices=("off", "on", "any"),
         default="off",
-        help="Fail fast if the server's actual online-memory conditioning state is not the expected ablation.",
+        help="Require the server to report the expected PIM conditioning state.",
     )
     parser.add_argument(
-        "--online-session-id",
+        "--pim-session-id",
+        dest="pim_session_id",
         default=None,
         help="Session key shared across repeated attempts of the same task; defaults to the task name.",
     )
     parser.add_argument(
-        "--online-task-cluster",
+        "--task-cluster",
+        dest="task_cluster",
         default=None,
         help="Atomic-5 task cluster key; defaults to --task.",
     )
@@ -349,11 +352,11 @@ def main() -> None:
     args = parser.parse_args()
     if args.open_loop_steps != EXECUTED_ACTION_HORIZON:
         raise ValueError(
-            f"Phase-0 requires --open-loop-steps={EXECUTED_ACTION_HORIZON}; "
-            "all memory on/off comparisons must use the same controller horizon"
+            f"Zeva requires --open-loop-steps={EXECUTED_ACTION_HORIZON}; "
+            "all PIM comparisons must use the same controller horizon"
         )
     if args.max_steps != MAX_CONTROLS_PER_ATTEMPT:
-        raise ValueError(f"Phase-0 requires --max-steps={MAX_CONTROLS_PER_ATTEMPT}")
+        raise ValueError(f"Zeva requires --max-steps={MAX_CONTROLS_PER_ATTEMPT}")
     if args.attempt_start < 0:
         raise ValueError("--attempt-start must be non-negative")
     if args.attempt_start and args.seed_mode != "fixed":
@@ -364,8 +367,8 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     client = WebsocketClientPolicy(args.host, args.port)
     results = []
-    online_task_cluster = args.online_task_cluster or args.task
-    base_session_id = args.online_session_id or default_session_id(online_task_cluster, args.seed)
+    task_cluster = args.task_cluster or args.task
+    base_session_id = args.pim_session_id or default_session_id(task_cluster, args.seed)
 
     episodes_path = args.output_dir / "episodes.jsonl"
     if args.attempt_start:
@@ -392,7 +395,7 @@ def main() -> None:
             args.output_dir,
             results,
             session_id=base_session_id,
-            task_cluster=online_task_cluster,
+            task_cluster=task_cluster,
             environment_seed=args.seed,
         )
         print("RESTORE " + json.dumps(restore_info), flush=True)
@@ -416,21 +419,21 @@ def main() -> None:
         warmup_reset = warmup_env.reset()
         warmup_obs = warmup_reset[0] if isinstance(warmup_reset, tuple) else warmup_reset
         warmup_policy_obs, _ = prepare_policy_observation(warmup_obs, TASK_PROMPTS[args.task])
-        warmup_policy_obs["behavior_boundary_images"] = np.expand_dims(
+        warmup_policy_obs["cte_boundary_images"] = np.expand_dims(
             warmup_policy_obs["observation/image"].copy(), axis=0
         )
-        warmup_policy_obs["behavior_transition_actions"] = np.empty((0, 4, 7), dtype=np.float32)
-        warmup_policy_obs["behavior_reset"] = True
-        warmup_policy_obs["online_session_id"] = f"{base_session_id}:discarded-warmup"
-        warmup_policy_obs["online_task_cluster"] = online_task_cluster
-        warmup_policy_obs["online_environment_seed"] = args.seed
-        warmup_policy_obs["online_attempt_id"] = 0
-        warmup_policy_obs["online_memory_reset"] = True
-        warmup_policy_obs["online_replan_reset"] = False
-        warmup_policy_obs["online_latent_index"] = 0
-        warmup_policy_obs["online_replan_index"] = 0
-        warmup_policy_obs["online_executed_action"] = np.empty((0, 7), dtype=np.float32)
-        warmup_policy_obs["online_transition_complete"] = False
+        warmup_policy_obs["cte_transition_actions"] = np.empty((0, 4, 7), dtype=np.float32)
+        warmup_policy_obs["cte_reset"] = True
+        warmup_policy_obs["pim_session_id"] = f"{base_session_id}:discarded-warmup"
+        warmup_policy_obs["pim_task_cluster"] = task_cluster
+        warmup_policy_obs["pim_environment_seed"] = args.seed
+        warmup_policy_obs["pim_attempt_id"] = 0
+        warmup_policy_obs["pim_memory_reset"] = True
+        warmup_policy_obs["pim_replan_reset"] = False
+        warmup_policy_obs["pim_latent_index"] = 0
+        warmup_policy_obs["pim_replan_index"] = 0
+        warmup_policy_obs["pim_executed_action"] = np.empty((0, 7), dtype=np.float32)
+        warmup_policy_obs["pim_transition_complete"] = False
         warmup_policy_obs["inference_seed"] = inference_seed(args.diffusion_seed + 1_000_000, 0, warmup_index)
         warmup_output = client.infer(warmup_policy_obs)
         warmup_action = np.asarray(warmup_output["action"], dtype=np.float32)
@@ -441,10 +444,10 @@ def main() -> None:
     for episode_idx in range(args.attempt_start, args.attempt_start + args.episodes):
         episode_seed = args.seed if args.seed_mode == "fixed" else args.seed + episode_idx
         attempt_id = episode_idx if args.seed_mode == "fixed" else 0
-        online_session_id = (
+        pim_session_id = (
             base_session_id
             if args.seed_mode == "fixed"
-            else default_session_id(online_task_cluster, episode_seed)
+            else default_session_id(task_cluster, episode_seed)
         )
         env = gym.make(
             f"robocasa/{args.task}",
@@ -470,8 +473,8 @@ def main() -> None:
         # controls between them.  The policy server derives a first effect
         # only after four such transitions (16 executed controls).
         initial_policy_obs, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-        behavior_boundary_images: list[np.ndarray] = [initial_policy_obs["observation/image"].copy()]
-        behavior_transitions: list[np.ndarray] = []
+        cte_boundary_images: list[np.ndarray] = [initial_policy_obs["observation/image"].copy()]
+        cte_transitions: list[np.ndarray] = []
         pending_transition_actions: list[np.ndarray] = []
         actions_since_replan: list[np.ndarray] = []
         query_times = []
@@ -486,8 +489,8 @@ def main() -> None:
         effect_history_valid_values: list[np.ndarray] = []
         predicate_progress_values: list[float] = []
         predicate_progress_components: list[dict] = []
-        query_memory_info = []
-        observed_memory_conditioning: set[bool] = set()
+        pim_queries = []
+        observed_pim_conditioning: set[bool] = set()
         clipped_values = 0
         nonfinite_actions = 0
         success = False
@@ -497,25 +500,25 @@ def main() -> None:
         steps = 0
         while steps < args.max_steps and not success and not done:
             policy_obs, left_frame = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-            policy_obs["behavior_boundary_images"] = np.stack(behavior_boundary_images, axis=0)
-            policy_obs["behavior_transition_actions"] = (
-                np.stack(behavior_transitions, axis=0)
-                if behavior_transitions
+            policy_obs["cte_boundary_images"] = np.stack(cte_boundary_images, axis=0)
+            policy_obs["cte_transition_actions"] = (
+                np.stack(cte_transitions, axis=0)
+                if cte_transitions
                 else np.empty((0, 4, 7), dtype=np.float32)
             )
-            policy_obs["behavior_reset"] = steps == 0
-            policy_obs["online_session_id"] = online_session_id
-            policy_obs["online_task_cluster"] = online_task_cluster
-            policy_obs["online_environment_seed"] = episode_seed
-            policy_obs["online_attempt_id"] = attempt_id
-            policy_obs["online_memory_reset"] = steps == 0 and (
+            policy_obs["cte_reset"] = steps == 0
+            policy_obs["pim_session_id"] = pim_session_id
+            policy_obs["pim_task_cluster"] = task_cluster
+            policy_obs["pim_environment_seed"] = episode_seed
+            policy_obs["pim_attempt_id"] = attempt_id
+            policy_obs["pim_memory_reset"] = steps == 0 and (
                 episode_idx == 0 or args.seed_mode == "increment"
             )
-            policy_obs["online_replan_reset"] = (
+            policy_obs["pim_replan_reset"] = (
                 steps == 0 and episode_idx > 0 and args.seed_mode == "fixed"
             )
-            policy_obs["online_latent_index"] = steps
-            policy_obs["online_replan_index"] = len(query_times)
+            policy_obs["pim_latent_index"] = steps
+            policy_obs["pim_replan_index"] = len(query_times)
             if not args.no_video:
                 frames.append(left_frame.copy())
             if not action_queue:
@@ -523,11 +526,11 @@ def main() -> None:
                 predicate_progress_values.append(predicate_progress)
                 predicate_progress_components.append(predicate_components)
                 if actions_since_replan:
-                    policy_obs["online_executed_action"] = np.asarray(actions_since_replan, dtype=np.float32)
-                    policy_obs["online_transition_complete"] = len(actions_since_replan) == 16
+                    policy_obs["pim_executed_action"] = np.asarray(actions_since_replan, dtype=np.float32)
+                    policy_obs["pim_transition_complete"] = len(actions_since_replan) == 16
                 else:
-                    policy_obs["online_executed_action"] = np.empty((0, 7), dtype=np.float32)
-                    policy_obs["online_transition_complete"] = False
+                    policy_obs["pim_executed_action"] = np.empty((0, 7), dtype=np.float32)
+                    policy_obs["pim_transition_complete"] = False
                 request_seed = inference_seed(args.diffusion_seed, attempt_id, len(query_times))
                 policy_obs["inference_seed"] = request_seed
                 start = time.monotonic()
@@ -536,36 +539,36 @@ def main() -> None:
                 query_steps.append(steps)
                 query_seeds.append(request_seed)
                 if isinstance(output.get("pim"), dict):
-                    query_memory_info.append({"backend": "pim", **dict(output["pim"])})
-                elif isinstance(output.get("online_memory"), dict):
-                    query_memory_info.append({"backend": "legacy_fifo", **dict(output["online_memory"])})
+                    pim_queries.append({"backend": "pim", **dict(output["pim"])})
+                elif isinstance(output.get("transition_memory"), dict):
+                    pim_queries.append({"backend": "transition_memory", **dict(output["transition_memory"])})
                 else:
-                    query_memory_info.append({})
+                    pim_queries.append({})
                 actions = np.asarray(output["action"], dtype=np.float32)
                 if actions.shape != (PREDICTED_ACTION_HORIZON, 7):
                     raise ValueError(
                         f"Policy returned action shape {actions.shape}, expected "
                         f"[{PREDICTED_ACTION_HORIZON},7]"
                     )
-                server_contract = output.get("phase0_contract")
+                server_contract = output.get("zeva_contract")
                 if not isinstance(server_contract, dict) or server_contract.get("version") != PROTOCOL_VERSION:
-                    raise ValueError("Policy server did not acknowledge the Phase-0 protocol")
+                    raise ValueError("Policy server did not acknowledge the Zeva protocol")
                 if int(server_contract.get("inference_seed", -1)) != request_seed:
                     raise ValueError("Policy server did not use the requested paired inference seed")
-                memory_conditioning = bool(server_contract.get("memory_conditioning", False))
-                observed_memory_conditioning.add(memory_conditioning)
-                expected_conditioning = {"off": False, "on": True}.get(args.expect_memory_conditioning)
-                if expected_conditioning is not None and memory_conditioning != expected_conditioning:
+                pim_conditioning = bool(server_contract.get("pim_conditioning", False))
+                observed_pim_conditioning.add(pim_conditioning)
+                expected_conditioning = {"off": False, "on": True}.get(args.expect_pim_conditioning)
+                if expected_conditioning is not None and pim_conditioning != expected_conditioning:
                     raise ValueError(
                         "Policy server memory conditioning mismatch: "
-                        f"expected={expected_conditioning}, actual={memory_conditioning}"
+                        f"expected={expected_conditioning}, actual={pim_conditioning}"
                     )
                 nonfinite_actions += int((~np.isfinite(actions)).sum())
                 clipped_values += int((np.abs(actions) > 1.0).sum())
                 predicted_actions.append(actions.copy())
-                features = output.get("behavior_features")
+                features = output.get("cte_features")
                 if not isinstance(features, dict):
-                    raise ValueError("Phase-1 requires behavior_features from the policy server")
+                    raise ValueError("PIM evaluation requires CTE features from the policy server")
                 phase_features.append(np.asarray(features["phase"], dtype=np.float32))
                 visual_key_features.append(np.asarray(features["visual_key"], dtype=np.float32))
                 effect_post_features.append(np.asarray(features["latest_effect_post"], dtype=np.float32))
@@ -582,8 +585,8 @@ def main() -> None:
             pending_transition_actions.append(executed_action.astype(np.float32, copy=True))
             if len(pending_transition_actions) == 4:
                 boundary_policy_obs, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-                behavior_boundary_images.append(boundary_policy_obs["observation/image"].copy())
-                behavior_transitions.append(np.stack(pending_transition_actions, axis=0))
+                cte_boundary_images.append(boundary_policy_obs["observation/image"].copy())
+                cte_transitions.append(np.stack(pending_transition_actions, axis=0))
                 pending_transition_actions.clear()
             steps += 1
 
@@ -592,34 +595,34 @@ def main() -> None:
         final_progress = 1.0 if success else 0.0
         terminal_predicate_progress, terminal_predicate_components = task_predicate_progress(env, args.task)
         final_policy_obs, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-        final_policy_obs["behavior_boundary_images"] = np.stack(behavior_boundary_images, axis=0)
-        final_policy_obs["behavior_transition_actions"] = (
-            np.stack(behavior_transitions, axis=0)
-            if behavior_transitions
+        final_policy_obs["cte_boundary_images"] = np.stack(cte_boundary_images, axis=0)
+        final_policy_obs["cte_transition_actions"] = (
+            np.stack(cte_transitions, axis=0)
+            if cte_transitions
             else np.empty((0, 4, 7), dtype=np.float32)
         )
         final_policy_obs.update(
             {
-                "online_finalize_attempt": True,
-                "online_session_id": online_session_id,
-                "online_task_cluster": online_task_cluster,
-                "online_environment_seed": episode_seed,
-                "online_attempt_id": attempt_id,
-                "online_latent_index": steps,
-                "online_executed_action": np.asarray(actions_since_replan, dtype=np.float32),
-                "online_transition_complete": len(actions_since_replan) == EXECUTED_ACTION_HORIZON,
-                "online_terminal_outcome": terminal_outcome,
-                "online_termination_reason": termination_reason,
-                "online_total_steps": steps,
-                "online_final_progress": final_progress,
+                "pim_finalize_attempt": True,
+                "pim_session_id": pim_session_id,
+                "pim_task_cluster": task_cluster,
+                "pim_environment_seed": episode_seed,
+                "pim_attempt_id": attempt_id,
+                "pim_latent_index": steps,
+                "pim_executed_action": np.asarray(actions_since_replan, dtype=np.float32),
+                "pim_transition_complete": len(actions_since_replan) == EXECUTED_ACTION_HORIZON,
+                "pim_terminal_outcome": terminal_outcome,
+                "pim_termination_reason": termination_reason,
+                "pim_total_steps": steps,
+                "pim_final_progress": final_progress,
             }
         )
         finalize_output = client.infer(final_policy_obs)
-        finalize_info = finalize_output.get("online_finalize")
+        finalize_info = finalize_output.get("pim_finalize")
         if not isinstance(finalize_info, dict):
-            raise ValueError("Phase-1 server did not acknowledge attempt finalization")
+            raise ValueError("PIM server did not acknowledge attempt finalization")
         if int(finalize_info.get("attempt_id", -1)) != attempt_id:
-            raise ValueError("Phase-1 finalize attempt mismatch")
+            raise ValueError("PIM attempt finalization mismatch")
 
         chunk_records = []
         for replan_index, start_step in enumerate(query_steps):
@@ -635,8 +638,8 @@ def main() -> None:
                     "completed_16": executed_count == EXECUTED_ACTION_HORIZON,
                     "inference_seed": query_seeds[replan_index],
                     "memory_entries_before_query": int(
-                        query_memory_info[replan_index].get(
-                            "entries_total", query_memory_info[replan_index].get("num_entries", 0)
+                        pim_queries[replan_index].get(
+                            "entries_total", pim_queries[replan_index].get("num_entries", 0)
                         )
                     ),
                     "predicate_progress_before": predicate_progress_values[replan_index],
@@ -656,10 +659,10 @@ def main() -> None:
         artifact_path = args.output_dir / f"attempt_{attempt_id:03d}_seed_{episode_seed}.npz"
         np.savez_compressed(
             artifact_path,
-            behavior_boundary_images=np.stack(behavior_boundary_images, axis=0),
-            behavior_transition_actions=(
-                np.stack(behavior_transitions, axis=0)
-                if behavior_transitions
+            cte_boundary_images=np.stack(cte_boundary_images, axis=0),
+            cte_transition_actions=(
+                np.stack(cte_transitions, axis=0)
+                if cte_transitions
                 else np.empty((0, 4, 7), dtype=np.float32)
             ),
             executed_actions=np.asarray(executed_actions, dtype=np.float32),
@@ -682,7 +685,7 @@ def main() -> None:
         env.close()
         record = {
             "schema_version": ATTEMPT_RECORD_VERSION,
-            "session_id": online_session_id,
+            "session_id": pim_session_id,
             "task": args.task,
             "episode": episode_idx,
             "attempt_id": attempt_id,
@@ -701,13 +704,13 @@ def main() -> None:
             "predicate_progress_components": predicate_progress_components,
             "queries": len(query_times),
             "mean_query_seconds": float(np.mean(query_times)) if query_times else None,
-            "online_session_id": online_session_id,
+            "pim_session_id": pim_session_id,
             "seed_mode": args.seed_mode,
             "diffusion_seed_base": args.diffusion_seed,
             "protocol": contract_manifest(),
-            "server_memory_conditioning": sorted(observed_memory_conditioning),
-            "online_memory_queries": query_memory_info,
-            "online_finalize": finalize_info,
+            "server_pim_conditioning": sorted(observed_pim_conditioning),
+            "pim_queries": pim_queries,
+            "pim_finalize": finalize_info,
             "chunk_records": chunk_records,
             "artifact_npz": artifact_path.name,
             "artifact_sha256": sha256_file(artifact_path),
@@ -737,9 +740,9 @@ def main() -> None:
         "environment_seeds": sorted({item["seed"] for item in results}),
         "diffusion_seed_base": args.diffusion_seed,
         "protocol": contract_manifest(),
-        "expected_memory_conditioning": args.expect_memory_conditioning,
-        "observed_memory_conditioning": sorted(
-            {value for item in results for value in item["server_memory_conditioning"]}
+        "expected_pim_conditioning": args.expect_pim_conditioning,
+        "observed_pim_conditioning": sorted(
+            {value for item in results for value in item["server_pim_conditioning"]}
         ),
         "mean_query_seconds": float(
             np.mean([item["mean_query_seconds"] for item in results if item["mean_query_seconds"] is not None])

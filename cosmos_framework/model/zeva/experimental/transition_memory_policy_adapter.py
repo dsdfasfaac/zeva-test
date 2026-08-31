@@ -1,9 +1,9 @@
-"""Learned action residual projector for the Cosmos online-memory prefix.
+"""Learned action residual projector for the Cosmos transition-memory prefix.
 
 This module is intentionally tiny and dependency-light so the same class can
 be copied into the remote Cosmos framework checkout.  It is not a selector:
 it receives only the server-produced action chunk, the current phase/visual
-features and the learned online-memory context, and emits a bounded residual.
+features and the learned transition-memory context, and emits a bounded residual.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import torch
 from torch import Tensor, nn
 
 
-ACTION_PROJECTOR_FORMAT = "robocasa_atomic5_online_memory_action_projector_v1"
+ACTION_PROJECTOR_FORMAT = "robocasa_atomic5_transition_memory_action_projector_v1"
 
 
 class TransitionMemoryPolicyAdapter(nn.Module):

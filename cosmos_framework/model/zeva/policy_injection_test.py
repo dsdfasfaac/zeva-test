@@ -35,7 +35,7 @@ def test_zero_projection_has_direct_action_gradient() -> None:
     assert torch.count_nonzero(weight_grad) > 0
 
 
-def test_brief_interaction_trace_keeps_legacy_tensor_path_exact() -> None:
+def test_brief_interaction_trace_tensor_path_is_exact() -> None:
     torch.manual_seed(7)
     prior = PolicyInjectionPrior(PolicyInjectionConfig(horizon=4, action_dim=2))
     task_context = torch.randn(2, 256)

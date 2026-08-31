@@ -53,7 +53,7 @@ class TransitionMemoryController:
     def read(self, phase: torch.Tensor, visual_key: torch.Tensor) -> TransitionMemoryReadout:
         """Read only transitions written before this replan."""
         if not self._replan_open:
-            raise RuntimeError("begin_replan() must precede an online-memory read")
+            raise RuntimeError("begin_replan() must precede an transition-memory read")
         entries, scores = self.memory.query(phase.detach().cpu(), visual_key.detach().cpu())
         if self.enabled:
             context = self.encoder(phase, visual_key, entries)

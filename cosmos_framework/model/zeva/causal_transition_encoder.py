@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Stage-1 Causal Transition Encoder (CTE) for robot trajectories.
+"""Causal Transition Encoder (CTE) for robot trajectories.
 
 This is intentionally independent from the Cosmos action denoiser.  It learns a
 per-time-step causal interaction state from the same multi-view observation and
@@ -357,9 +357,7 @@ class CausalTransitionEncoder(nn.Module):
                 frames.shape[0], frames.shape[1] - 1, self.cfg.transition_steps, self.cfg.action_dim
             ),
             "next_vision": self.visual_head(z),
-            # Frozen target-visual representation used as the online-memory
-            # retrieval key.  It is causal at the current observed frame and
-            # shares the Stage-1 VAE/CTE contract.
+            # Frozen target-visual representation used as the PIM retrieval key.
             "visual_key": F.normalize(target_visual[..., : self.cfg.phase_dim], dim=-1),
             "effect_pre": effect_pre,
             "effect_post": effect_post,

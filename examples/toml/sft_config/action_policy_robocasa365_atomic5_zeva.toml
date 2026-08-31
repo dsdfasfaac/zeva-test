@@ -1,12 +1,12 @@
-# Effect-v3 Stage 2 — RoboCasa Atomic-5.  Requires the baseline environment
+# Effect-v3 Zeva — RoboCasa Atomic-5.  Requires the baseline environment
 # plus ZEVA_TASK_CONTEXT_BANK and ZEVA_CTE_FEATURE_CACHE from the delivered CTE.
 
 [job]
 task = "vfm"
-experiment = "action_policy_robocasa365_atomic5_zeva_stage2"
+experiment = "action_policy_robocasa365_atomic5_zeva"
 project = "zeva"
-group = "stage2_robocasa_atomic5_effect_v3"
-name = "stage2_robocasa_atomic5_effect_v3_smoke"
+group = "zeva_robocasa_atomic5"
+name = "zeva_robocasa_atomic5_smoke"
 wandb_mode = "disabled"
 
 [model]

@@ -56,7 +56,7 @@ from cosmos_framework.model.zeva import (
     StaticTaskContextRetrievalHead,
     PersistentInteractionMemory,
     PersistentInteractionMemoryConfig,
-    remap_legacy_cte_state_dict,
+    normalize_cte_state_dict,
     retrieve_static_task_context,
 )
 from cosmos_framework.model.zeva.experimental.robocasa_transition_memory import make_robocasa_atomic5_schema
@@ -86,7 +86,6 @@ from cosmos_framework.scripts.action_policy_server_utils import (
 from cosmos_framework.scripts.action_policy_server_robocasa365_zeva import extract_batch, format_action_prompt
 from cosmos_framework.utils import log
 from cosmos_framework.utils.checkpoint_db import CheckpointDirHf
-from cosmos_framework.utils.lazy_config import instantiate
 
 _DEFAULT_DROID_POLICY_CHECKPOINT = "nvidia/Cosmos3-Nano-Policy-DROID"
 _DEFAULT_CONDITIONING_FPS = 20.0
@@ -377,7 +376,7 @@ class RobolabServerArgs(pydantic.BaseModel):
     action_space: ActionSpace = "joint_pos"
     """RoboLab action representation to serve."""
     use_state: bool = False
-    """Legacy action-as-state conditioning. Keep false for RoboCasa365."""
+    """Include action state in the policy input."""
     history_length: int = 0
     """State/history action rows to trim from the generated action output."""
     format_prompt_as_json: bool | None = None
@@ -385,33 +384,33 @@ class RobolabServerArgs(pydantic.BaseModel):
     proprio_dim: int = 9
     """Independent fixed-base proprio input: relative EEF pose (7) plus gripper qpos (2)."""
     task_context_bank: Path | None = None
-    """Frozen effect-v3 memory bank; enables the evaluation-only task-cluster oracle global token."""
+    """Task-context bank used by Zeva."""
     cte_checkpoint: Path | None = None
     """Frozen CTE checkpoint used to derive phase and causal-effect features."""
-    stage2_oracle_instruction: str | None = None
-    """Exact Atomic-5 task key used to average matching memory-bank behavior values."""
+    task_context_instruction: str | None = None
+    """Optional task key used to select a task-context prototype."""
     static_task_context_checkpoint: Path | None = None
     """Static task-context retrieval head, mutually exclusive with the task-ID oracle."""
     static_task_context_top_k: int = 5
-    """Number of frozen memory-bank entries used to form the learned global behavior token."""
-    stage2_effect_mode: Literal["normal", "zero", "shuffled"] = "normal"
+    """Number of retrieved entries used to form the task-context token."""
+    bit_mode: Literal["normal", "zero", "shuffled"] = "normal"
     """Evaluation ablation for completed causal effects; never use outside controlled diagnostics."""
     disable_policy_injection: bool = False
     """Diagnostic only: zero the policy adapter and task-context projector."""
-    online_memory_encoder_checkpoint: Path | None = None
-    """Standalone history-only RoboCasa Atomic-5 online-memory encoder checkpoint."""
-    online_memory_enabled: bool = False
+    transition_memory_encoder_checkpoint: Path | None = None
+    """Standalone history-only RoboCasa Atomic-5 transition-memory encoder checkpoint."""
+    transition_memory_enabled: bool = False
     """Condition the action branch on the retrieved online context."""
-    online_memory_shadow: bool = False
-    """Compute and log online memory while injecting a zero context (no action change)."""
-    online_memory_mode: Literal["normal", "empty", "shuffled", "wrong_task"] = "normal"
-    """Controlled runtime ablation for online-memory retrieval."""
-    online_memory_support_records: Path | None = None
+    transition_memory_shadow: bool = False
+    """Compute and log transition memory while injecting a zero context (no action change)."""
+    transition_memory_mode: Literal["normal", "empty", "shuffled", "wrong_task"] = "normal"
+    """Controlled runtime ablation for transition-memory retrieval."""
+    transition_memory_support_records: Path | None = None
     """Offline RoboCasa transition-record file used only by the wrong-task ablation."""
-    online_memory_support_task: str | None = None
+    transition_memory_support_task: str | None = None
     """Task cluster whose offline transitions are deliberately supplied as wrong-task support."""
     pim_enabled: bool = False
-    """Enable paper-aligned phase-retrieved Persistent Interaction Memory conditioning."""
+    """Enable phase-conditioned Persistent Interaction Memory."""
     pim_shadow: bool = False
     """Build/query PIM but send empty PIM tensors to the model."""
     pim_capacity: int = 64
@@ -425,20 +424,9 @@ class RobolabServerArgs(pydantic.BaseModel):
     pim_effect_merge_weight: float = 0.5
     """Effect contribution to PIM merge similarity."""
     pim_executed_action_horizon: int = EXECUTED_ACTION_HORIZON
-    """Executed controls required before committing one PIM effect.
-
-    The paper-aligned repeated-attempt protocol uses 16 controls.  Formal
-    Stage-2 regression evaluation uses the released 32-control open-loop
-    controller, so the horizon is configurable to permit a genuinely paired
-    PIM-on comparison without changing that controller protocol.
-    """
+    """Executed controls required before committing one PIM effect."""
     pim_success_replay_enabled: bool = False
-    """Lock a successful phase/action interaction trace for later attempts.
-
-    This opt-in test-time evolution path is deliberately disabled for formal
-    independent-seed evaluation.  It can activate only after the current PIM
-    session has observed a successful attempt.
-    """
+    """Retain a successful phase/action trace for later attempts."""
     pim_success_replay_phase_threshold: float = 0.80
     """Minimum current/locked phase cosine similarity for guarded replay."""
     pim_success_replay_blend: float = 1.0
@@ -498,8 +486,8 @@ class RobolabPolicyService:
         if self.cfg.image_height <= 0 or self.cfg.image_width <= 0:
             raise ValueError("--image-height and --image-width must be positive")
 
-        self._init_stage2_oracle(args)
-        self._init_online_memory(args)
+        self._init_zeva(args)
+        self._init_transition_memory(args)
         self._init_pim(args)
         self._lock = threading.Lock()
         self._rng = np.random.default_rng(self.cfg.seed)
@@ -512,74 +500,68 @@ class RobolabPolicyService:
             f"seed={self.cfg.seed} deterministic_seed={self.cfg.deterministic_seed}"
         )
 
-    def _init_online_memory(self, args: RobolabServerArgs) -> None:
-        """Load the RoboCasa encoder and create a task-scoped causal controller.
-
-        The controller is deliberately separate from Stage-2: it only reads
-        transitions committed by a previous completed 16-step replan.  The
-        first implementation serves one simulator session per process, which
-        is the contract used by the closed-loop evaluator.
-        """
-        self._online_enabled = bool(args.online_memory_enabled or args.online_memory_shadow)
-        self._online_shadow = bool(args.online_memory_shadow)
-        self._online_mode = args.online_memory_mode
-        self._online_controller: Any | None = None
-        self._online_replan_open = False
-        self._online_pending_start: dict[str, torch.Tensor] | None = None
-        self._online_session_id: str | None = None
-        self._online_session_key: AttemptSessionKey | None = None
-        self._online_attempt_id: int | None = None
-        self._online_wrong_task_entries: list[TransitionRecord] = []
-        self._online_support_task: str | None = None
-        if not self._online_enabled:
+    def _init_transition_memory(self, args: RobolabServerArgs) -> None:
+        """Load the experimental task-scoped transition-memory controller."""
+        self._transition_enabled = bool(args.transition_memory_enabled or args.transition_memory_shadow)
+        self._transition_shadow = bool(args.transition_memory_shadow)
+        self._transition_mode = args.transition_memory_mode
+        self._transition_controller: Any | None = None
+        self._transition_replan_open = False
+        self._transition_pending_start: dict[str, torch.Tensor] | None = None
+        self._transition_session_id: str | None = None
+        self._transition_session_key: AttemptSessionKey | None = None
+        self._transition_attempt_id: int | None = None
+        self._transition_wrong_task_entries: list[TransitionRecord] = []
+        self._transition_support_task: str | None = None
+        if not self._transition_enabled:
             return
-        if not self._stage2_oracle_enabled:
+        if not self._zeva_enabled:
             raise ValueError("Experimental transition memory requires CTE/task-context features")
-        if args.online_memory_encoder_checkpoint is None:
-            raise ValueError("--online-memory-encoder-checkpoint is required for online memory")
-        if not args.online_memory_encoder_checkpoint.is_file():
-            raise FileNotFoundError(args.online_memory_encoder_checkpoint)
-        payload = torch.load(args.online_memory_encoder_checkpoint, map_location="cpu", weights_only=False)
-        if payload.get("format") != "robocasa_atomic5_online_memory_encoder_v1":
-            raise ValueError("Unsupported RoboCasa online-memory encoder format")
+        if args.transition_memory_encoder_checkpoint is None:
+            raise ValueError("--transition-memory-encoder-checkpoint is required for transition memory")
+        if not args.transition_memory_encoder_checkpoint.is_file():
+            raise FileNotFoundError(args.transition_memory_encoder_checkpoint)
+        payload = torch.load(args.transition_memory_encoder_checkpoint, map_location="cpu", weights_only=False)
+        if payload.get("format") != "robocasa_atomic5_transition_memory_encoder_v1":
+            raise ValueError("Unsupported RoboCasa transition-memory encoder format")
         raw_schema = dict(payload.get("schema", {}))
         schema = TransitionMemorySchema(**{k: raw_schema[k] for k in TransitionMemorySchema.__dataclass_fields__ if k in raw_schema})
         expected = make_robocasa_atomic5_schema(
-            vbe_hash=schema.vbe_hash,
+            cte_hash=schema.cte_hash,
             vae_temporal_hash=schema.vae_temporal_hash,
             capacity=schema.capacity,
             top_k=schema.top_k,
         )
         if schema.hash != expected.hash or raw_schema.get("hash") != schema.hash:
-            raise ValueError("Online-memory encoder schema/hash is not RoboCasa Atomic-5 compatible")
+            raise ValueError("Transition-memory encoder schema/hash is not RoboCasa Atomic-5 compatible")
         if (
             schema.action_dim != 7
             or schema.action_horizon != EXECUTED_ACTION_HORIZON
             or schema.task_contract != expected.task_contract
         ):
-            raise ValueError("Online-memory encoder has the wrong RoboCasa action/temporal contract")
+            raise ValueError("Transition-memory encoder has the wrong RoboCasa action/temporal contract")
         encoder = TransitionMemoryEncoder(schema=schema, hidden_dim=256)
         encoder.load_state_dict(payload["model"], strict=True)
         device = next(self.model.parameters()).device
-        self._online_controller = TransitionMemoryController(
-            schema=schema, encoder=encoder.to(device), enabled=bool(args.online_memory_enabled)
+        self._transition_controller = TransitionMemoryController(
+            schema=schema, encoder=encoder.to(device), enabled=bool(args.transition_memory_enabled)
         )
-        self._online_controller.encoder.eval()
-        if self._online_mode == "wrong_task":
-            if args.online_memory_support_records is None or args.online_memory_support_task is None:
+        self._transition_controller.encoder.eval()
+        if self._transition_mode == "wrong_task":
+            if args.transition_memory_support_records is None or args.transition_memory_support_task is None:
                 raise ValueError(
-                    "wrong_task mode requires --online-memory-support-records and "
-                    "--online-memory-support-task"
+                    "wrong_task mode requires --transition-memory-support-records and "
+                    "--transition-memory-support-task"
                 )
-            support_payload = torch.load(args.online_memory_support_records, map_location="cpu", weights_only=False)
-            self._online_support_task = str(args.online_memory_support_task)
+            support_payload = torch.load(args.transition_memory_support_records, map_location="cpu", weights_only=False)
+            self._transition_support_task = str(args.transition_memory_support_task)
             support_schema = str(support_payload.get("schema", {}).get("hash", ""))
             if support_schema != schema.hash:
                 raise ValueError("wrong-task support records have a schema hash mismatch")
             for raw in support_payload.get("transitions", []):
-                if raw.get("task_cluster") != args.online_memory_support_task:
+                if raw.get("task_cluster") != args.transition_memory_support_task:
                     continue
-                self._online_wrong_task_entries.append(
+                self._transition_wrong_task_entries.append(
                     TransitionRecord(
                         task_cluster=str(raw["task_cluster"]),
                         phase=raw["phase"].float().cpu(),
@@ -592,12 +574,12 @@ class RobolabPolicyService:
                         schema_hash=schema.hash,
                     )
                 )
-            if not self._online_wrong_task_entries:
-                raise ValueError(f"No transitions found for wrong-task support {args.online_memory_support_task!r}")
+            if not self._transition_wrong_task_entries:
+                raise ValueError(f"No transitions found for wrong-task support {args.transition_memory_support_task!r}")
         log.info(
-            "[robolab-policy-server] RoboCasa online memory ready "
-            f"mode={self._online_mode} conditioning={bool(args.online_memory_enabled)} "
-            f"shadow={self._online_shadow} schema_hash={schema.hash}"
+            "[robolab-policy-server] RoboCasa transition memory ready "
+            f"mode={self._transition_mode} conditioning={bool(args.transition_memory_enabled)} "
+            f"shadow={self._transition_shadow} schema_hash={schema.hash}"
         )
 
     def _init_pim(self, args: RobolabServerArgs) -> None:
@@ -626,9 +608,9 @@ class RobolabPolicyService:
         self._pim_success_attempt_id: int | None = None
         if not self._pim_active:
             return
-        if self._online_enabled:
-            raise ValueError("PIM and legacy online-memory conditioning are mutually exclusive")
-        if not self._stage2_oracle_enabled:
+        if self._transition_enabled:
+            raise ValueError("PIM and transition-memory conditioning are mutually exclusive")
+        if not self._zeva_enabled:
             raise ValueError("PIM requires CTE/task-context features")
         if self._pim_conditioning and not self._model_has_pim:
             raise ValueError("--pim-enabled requires a checkpoint trained with pim_memory_enabled=true")
@@ -749,39 +731,32 @@ class RobolabPolicyService:
             return self.cfg.seed
         return int(self._rng.integers(0, 2**31))
 
-    def _init_stage2_oracle(self, args: RobolabServerArgs) -> None:
-        """Load frozen Stage-1 artifacts for a causal, evaluation-only oracle path.
-
-        This helper only validates the task-ID oracle. Static task-context
-        retrieval is handled by the dedicated retrieval head. The
-        supplied task key selects the mean global value from the matching
-        training-task cluster, while phase/effect are recomputed only from
-        observations and actions the evaluation client has already executed.
-        """
+    def _init_zeva(self, args: RobolabServerArgs) -> None:
+        """Load the CTE and task-context retrieval components."""
         artifacts = (
             args.task_context_bank,
             args.cte_checkpoint,
-            args.stage2_oracle_instruction,
+            args.task_context_instruction,
             args.static_task_context_checkpoint,
         )
         if not any(item is not None for item in artifacts):
-            self._stage2_oracle_enabled = False
+            self._zeva_enabled = False
             return
         if args.task_context_bank is None or args.cte_checkpoint is None:
             raise ValueError(
                 "Zeva serving requires --task-context-bank and --cte-checkpoint"
             )
-        if (args.stage2_oracle_instruction is None) == (args.static_task_context_checkpoint is None):
+        if (args.task_context_instruction is None) == (args.static_task_context_checkpoint is None):
             raise ValueError(
-                "Provide exactly one of --stage2-oracle-instruction or --static-task-context-checkpoint"
+                "Provide exactly one of --task-context-instruction or --static-task-context-checkpoint"
             )
         if args.static_task_context_top_k < 1:
             raise ValueError("--static-task-context-top-k must be positive")
-        self._stage2_effect_mode = args.stage2_effect_mode
+        self._bit_mode = args.bit_mode
         assert args.task_context_bank is not None
         assert args.cte_checkpoint is not None
         if not args.task_context_bank.is_file() or not args.cte_checkpoint.is_file():
-            raise FileNotFoundError("Stage-2 oracle artifacts must be regular files")
+            raise FileNotFoundError("Zeva artifacts must be regular files")
         if getattr(self.model.net, "behavior_pbd", None) is None:
             raise ValueError("Loaded policy has no Zeva policy-injection prior; refusing oracle-effect evaluation")
         if args.disable_policy_injection:
@@ -804,8 +779,6 @@ class RobolabPolicyService:
             if not args.static_task_context_checkpoint.is_file():
                 raise FileNotFoundError(f"Static task-context checkpoint not found: {args.static_task_context_checkpoint}")
             retrieval_payload = torch.load(args.static_task_context_checkpoint, map_location="cpu", weights_only=True)
-            # Keep existing released checkpoints loadable after the public
-            # rename while all newly written metadata uses the zeva marker.
             supported_formats = {
                 "zeva_retrieval_head_v1",
                 "cosmos_" + "behavior_retrieval_head_v1",
@@ -823,16 +796,16 @@ class RobolabPolicyService:
                 raise ValueError("Static task-context output dimension does not match bank retrieval keys")
             self._static_task_context_top_k = min(args.static_task_context_top_k, len(entries))
         else:
-            assert args.stage2_oracle_instruction is not None
+            assert args.task_context_instruction is not None
             matching = [
                 entry["behavior_value"].float()
                 for entry in entries
-                if entry.get("instruction") == args.stage2_oracle_instruction
+                if entry.get("instruction") == args.task_context_instruction
             ]
             if not matching:
                 available = sorted({str(entry.get("instruction", "")) for entry in entries})
-                raise ValueError(f"No memory-bank entries for {args.stage2_oracle_instruction!r}; available={available}")
-            self._stage2_global = torch.stack(matching).mean(dim=0, keepdim=True).to(device=device)
+                raise ValueError(f"No memory-bank entries for {args.task_context_instruction!r}; available={available}")
+            self._task_context = torch.stack(matching).mean(dim=0, keepdim=True).to(device=device)
         payload = torch.load(args.cte_checkpoint, map_location="cpu", weights_only=False)
         cte_model_config = dict(payload["model_config"])
         cte_state = payload["model"]
@@ -841,11 +814,11 @@ class RobolabPolicyService:
         elif any(key.endswith("mixer.A_log") for key in cte_state):
             cte_model_config["use_mamba"] = True
         self._cte = CausalTransitionEncoder(CausalTransitionEncoderConfig(**cte_model_config)).to(device)
-        self._cte.load_state_dict(remap_legacy_cte_state_dict(cte_state))
+        self._cte.load_state_dict(normalize_cte_state_dict(cte_state))
         self._cte.eval()
         if self._cte.cfg.action_dim != self.cfg.action_dim:
             raise ValueError("CTE action dimension does not match policy action dimension")
-        self._stage2_oracle_enabled = True
+        self._zeva_enabled = True
         if self._static_task_context_enabled:
             log.info(
                 "[robolab-policy-server] static task-context retrieval enabled "
@@ -853,11 +826,11 @@ class RobolabPolicyService:
             )
         else:
             log.info(
-                "[robolab-policy-server] Stage-2 oracle effect enabled "
-                f"task={args.stage2_oracle_instruction!r} bank_entries={len(matching)}"
+                "[robolab-policy-server] task-context prototype enabled "
+                f"task={args.task_context_instruction!r} bank_entries={len(matching)}"
             )
 
-    def _encode_stage2_frame(self, image: np.ndarray) -> torch.Tensor:
+    def _encode_cte_frame(self, image: np.ndarray) -> torch.Tensor:
         """Map one observed concatenated RGB image to the CTE's Wan latent."""
         device = next(self.model.parameters()).device
         frame = torch.from_numpy(np.ascontiguousarray(image)).to(device=device, dtype=torch.float32)
@@ -871,8 +844,8 @@ class RobolabPolicyService:
     def _task_context_from_initial_observation(self, image: np.ndarray, prompt: str) -> torch.Tensor:
         """Retrieve static task context from the initial observation and instruction."""
         if not self._static_task_context_enabled:
-            return self._stage2_global
-        latent = self._encode_stage2_frame(image).unsqueeze(0)
+            return self._task_context
+        latent = self._encode_cte_frame(image).unsqueeze(0)
         readout = extract_batch(self.model, latent, [format_action_prompt(prompt)]).to(
             device=latent.device, dtype=torch.float32
         )
@@ -886,31 +859,31 @@ class RobolabPolicyService:
         )
         return values.float()
 
-    def _stage2_oracle_features(
+    def _causal_interaction_features(
         self, obs: dict[str, Any], image: np.ndarray
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool]:
         """Return task-cluster global plus causal phase/four-effect history.
 
-        ``behavior_boundary_images`` contains observations at raw offsets
-        0,4,8,...; ``behavior_transition_actions`` contains the corresponding
+        ``cte_boundary_images`` contains observations at raw offsets
+        0,4,8,...; ``cte_transition_actions`` contains the corresponding
         executed [4,arm7] transitions.  Thus an effect token becomes readable
         only after four completed transitions (16 raw controls).
         """
-        if not self._stage2_oracle_enabled:
-            raise RuntimeError("Stage-2 oracle features requested while disabled")
-        frames_rgb = np.asarray(obs.get("behavior_boundary_images", np.expand_dims(image, axis=0)))
+        if not self._zeva_enabled:
+            raise RuntimeError("Zeva causal-interaction features are not configured")
+        frames_rgb = np.asarray(obs.get("cte_boundary_images", np.expand_dims(image, axis=0)))
         transitions = np.asarray(
-            obs.get("behavior_transition_actions", np.empty((0, 4, self.cfg.action_dim), dtype=np.float32)),
+            obs.get("cte_transition_actions", np.empty((0, 4, self.cfg.action_dim), dtype=np.float32)),
             dtype=np.float32,
         )
         if frames_rgb.ndim != 4 or frames_rgb.shape[-1] != 3:
-            raise ValueError(f"behavior_boundary_images must be [T,H,W,3], got {frames_rgb.shape}")
+            raise ValueError(f"cte_boundary_images must be [T,H,W,3], got {frames_rgb.shape}")
         if transitions.shape != (frames_rgb.shape[0] - 1, 4, self.cfg.action_dim):
             raise ValueError(
-                "behavior_transition_actions must be [T-1,4,arm7], got "
+                "cte_transition_actions must be [T-1,4,arm7], got "
                 f"{transitions.shape} for T={frames_rgb.shape[0]}"
             )
-        latents = torch.stack([self._encode_stage2_frame(_ensure_rgb_uint8_image(frame, "behavior_boundary_images")) for frame in frames_rgb])
+        latents = torch.stack([self._encode_cte_frame(_ensure_rgb_uint8_image(frame, "cte_boundary_images")) for frame in frames_rgb])
         frames = latents.unsqueeze(0)
         actions = torch.from_numpy(np.ascontiguousarray(transitions)).to(device=frames.device, dtype=torch.float32).unsqueeze(0)
         valid = torch.ones((1, frames.shape[1]), dtype=torch.bool, device=frames.device)
@@ -924,10 +897,10 @@ class RobolabPolicyService:
         if take:
             history[0, -take:] = completed[-take:]
             history_valid[0, -take:] = True
-        if self._stage2_effect_mode == "zero":
+        if self._bit_mode == "zero":
             # Preserve temporal availability while removing effect content.
             history.zero_()
-        elif self._stage2_effect_mode == "shuffled" and take > 1:
+        elif self._bit_mode == "shuffled" and take > 1:
             # Reverse only completed slots and keep their right-aligned causal positions.
             history[0, -take:] = history[0, -take:].flip(dims=(0,))
         global_feature = self._task_context_from_initial_observation(frames_rgb[0], str(obs["prompt"]))
@@ -950,7 +923,7 @@ class RobolabPolicyService:
             current_effect_valid,
         )
 
-    def _online_context(
+    def _transition_context(
         self,
         obs: dict[str, Any],
         phase: torch.Tensor,
@@ -958,75 +931,75 @@ class RobolabPolicyService:
         effect_post: torch.Tensor,
         effect_valid: bool,
     ) -> tuple[torch.Tensor, dict[str, Any]] | None:
-        """Read/commit one causal online-memory step.
+        """Read/commit one causal transition-memory step.
 
-        ``online_executed_action`` is accepted only on the *next* request and
+        ``pim_executed_action`` is accepted only on the *next* request and
         must contain exactly the 16 controls executed after the previous
         request.  Therefore an incomplete/safety-aborted rollout cannot enter
         the memory.  The current request itself is never used as support.
         """
-        controller = self._online_controller
+        controller = self._transition_controller
         if controller is None:
             return None
-        task_cluster = str(obs.get("online_task_cluster") or obs.get("prompt") or "")
+        task_cluster = str(obs.get("pim_task_cluster") or obs.get("prompt") or "")
         if not task_cluster:
-            raise ValueError("online_task_cluster/prompt is required for online memory")
-        session_id = str(obs.get("online_session_id") or task_cluster)
-        environment_seed = int(obs.get("online_environment_seed", -1))
-        attempt_id = int(obs.get("online_attempt_id", -1))
+            raise ValueError("pim_task_cluster/prompt is required for transition memory")
+        session_id = str(obs.get("pim_session_id") or task_cluster)
+        environment_seed = int(obs.get("pim_environment_seed", -1))
+        attempt_id = int(obs.get("pim_attempt_id", -1))
         if environment_seed < 0 or attempt_id < 0:
-            raise ValueError("online_environment_seed and online_attempt_id are required and must be non-negative")
+            raise ValueError("pim_environment_seed and pim_attempt_id are required and must be non-negative")
         requested_session = AttemptSessionKey(session_id, task_cluster, environment_seed)
-        reset_memory = bool(obs.get("online_memory_reset", False))
-        reset_replan = bool(obs.get("online_replan_reset", False))
-        if reset_memory or self._online_session_id != session_id:
+        reset_memory = bool(obs.get("pim_memory_reset", False))
+        reset_replan = bool(obs.get("pim_replan_reset", False))
+        if reset_memory or self._transition_session_id != session_id:
             if attempt_id != 0:
-                raise ValueError("a new attempt-session must start at online_attempt_id=0")
+                raise ValueError("a new attempt-session must start at pim_attempt_id=0")
             controller.reset(task_cluster)
-            self._online_replan_open = False
-            self._online_pending_start = None
-            self._online_session_id = session_id
-            self._online_session_key = requested_session
-            self._online_attempt_id = attempt_id
+            self._transition_replan_open = False
+            self._transition_pending_start = None
+            self._transition_session_id = session_id
+            self._transition_session_key = requested_session
+            self._transition_attempt_id = attempt_id
         elif controller.memory.task_cluster != task_cluster:
             # A task change without an explicit reset is unsafe; fail-fast
             # rather than mixing support across Atomic-5 clusters.
             raise ValueError(
-                f"online memory task changed from {controller.memory.task_cluster!r} to {task_cluster!r}; "
-                "send online_memory_reset=true"
+                f"transition memory task changed from {controller.memory.task_cluster!r} to {task_cluster!r}; "
+                "send pim_memory_reset=true"
             )
         else:
-            assert self._online_session_key is not None
-            self._online_session_key.assert_compatible(requested_session)
-            assert self._online_attempt_id is not None
-            if attempt_id < self._online_attempt_id or attempt_id > self._online_attempt_id + 1:
+            assert self._transition_session_key is not None
+            self._transition_session_key.assert_compatible(requested_session)
+            assert self._transition_attempt_id is not None
+            if attempt_id < self._transition_attempt_id or attempt_id > self._transition_attempt_id + 1:
                 raise ValueError(
-                    f"online_attempt_id must stay constant within an attempt or increment by one; "
-                    f"previous={self._online_attempt_id}, requested={attempt_id}"
+                    f"pim_attempt_id must stay constant within an attempt or increment by one; "
+                    f"previous={self._transition_attempt_id}, requested={attempt_id}"
                 )
-            if attempt_id == self._online_attempt_id + 1 and not reset_replan:
-                raise ValueError("a new attempt must send online_replan_reset=true")
-            self._online_attempt_id = attempt_id
+            if attempt_id == self._transition_attempt_id + 1 and not reset_replan:
+                raise ValueError("a new attempt must send pim_replan_reset=true")
+            self._transition_attempt_id = attempt_id
 
-        if self._online_replan_open:
+        if self._transition_replan_open:
             if reset_replan:
                 completed = False
                 executed = torch.zeros((controller.schema.action_horizon, controller.schema.action_dim))
             else:
-                executed_np = np.asarray(obs.get("online_executed_action", np.empty((0, 7))), dtype=np.float32)
-                completed = bool(obs.get("online_transition_complete", False))
+                executed_np = np.asarray(obs.get("pim_executed_action", np.empty((0, 7))), dtype=np.float32)
+                completed = bool(obs.get("pim_transition_complete", False))
                 if completed:
                     if executed_np.shape != (controller.schema.action_horizon, controller.schema.action_dim):
                         raise ValueError(
-                            "online_transition_complete requires exactly [16,7] executed actions, "
+                            "pim_transition_complete requires exactly [16,7] executed actions, "
                             f"got {executed_np.shape}"
                         )
-                    if not np.isfinite(executed_np).all() or self._online_pending_start is None or not effect_valid:
+                    if not np.isfinite(executed_np).all() or self._transition_pending_start is None or not effect_valid:
                         completed = False
                     executed = torch.from_numpy(np.ascontiguousarray(executed_np))
                 else:
                     executed = torch.zeros((controller.schema.action_horizon, controller.schema.action_dim))
-            pending = self._online_pending_start
+            pending = self._transition_pending_start
             if pending is None:
                 completed = False
                 pending = {"phase": phase.detach(), "visual_key": visual_key.detach()}
@@ -1037,35 +1010,35 @@ class RobolabPolicyService:
                 executed_action=executed,
                 next_visual_key=visual_key[0].detach(),
                 next_phase=phase[0].detach(),
-                latent_index=int(obs.get("online_latent_index", 0)),
+                latent_index=int(obs.get("pim_latent_index", 0)),
                 completed=completed,
                 metadata=(pending.get("metadata", {}) if isinstance(pending, dict) else {}),
             )
-            self._online_replan_open = False
-            self._online_pending_start = None
+            self._transition_replan_open = False
+            self._transition_pending_start = None
 
         controller.begin_replan()
         phase_cpu = phase[0].detach().float().cpu()
         visual_cpu = visual_key[0].detach().float().cpu()
-        if self._online_mode == "wrong_task":
+        if self._transition_mode == "wrong_task":
             query = F.normalize(torch.cat((phase_cpu, visual_cpu)), dim=0)
             keys = torch.stack(
-                [F.normalize(torch.cat((entry.phase, entry.visual_key)), dim=0) for entry in self._online_wrong_task_entries]
+                [F.normalize(torch.cat((entry.phase, entry.visual_key)), dim=0) for entry in self._transition_wrong_task_entries]
             )
             all_scores = keys @ query
-            k = min(controller.schema.top_k, len(self._online_wrong_task_entries))
+            k = min(controller.schema.top_k, len(self._transition_wrong_task_entries))
             scores, indices = torch.topk(all_scores, k=k, largest=True, sorted=True)
-            entries = [self._online_wrong_task_entries[int(index)] for index in indices]
+            entries = [self._transition_wrong_task_entries[int(index)] for index in indices]
         else:
             entries, scores = controller.memory.query(phase_cpu, visual_cpu)
-        if self._online_mode == "empty":
+        if self._transition_mode == "empty":
             entries = []
             scores = torch.empty(0, dtype=torch.float32)
-        elif self._online_mode == "shuffled":
+        elif self._transition_mode == "shuffled":
             entries = list(reversed(entries))
         context = controller.encoder(phase, visual_key, entries)
-        self._online_replan_open = True
-        self._online_pending_start = {
+        self._transition_replan_open = True
+        self._transition_pending_start = {
             "phase": phase[0].detach().float().cpu(),
             "visual_key": visual_key[0].detach().float().cpu(),
             "metadata": {
@@ -1073,7 +1046,7 @@ class RobolabPolicyService:
                 "task_cluster": task_cluster,
                 "environment_seed": environment_seed,
                 "attempt_id": attempt_id,
-                "replan_index": int(obs.get("online_replan_index", 0)),
+                "replan_index": int(obs.get("pim_replan_index", 0)),
             },
         }
         info = {
@@ -1084,11 +1057,11 @@ class RobolabPolicyService:
             "num_entries": len(entries),
             "topk_latent_indices": [int(entry.latent_index) for entry in entries],
             "scores": [float(score) for score in scores.tolist()],
-            "mode": self._online_mode,
-            "support_task": self._online_support_task,
-            "conditioning": bool(controller.enabled and not self._online_shadow),
+            "mode": self._transition_mode,
+            "support_task": self._transition_support_task,
+            "conditioning": bool(controller.enabled and not self._transition_shadow),
         }
-        log.info(f"[robolab-policy-server] online_memory {info}")
+        log.info(f"[robolab-policy-server] transition_memory {info}")
         return context, info
 
     def _empty_pim_tensors(self, reference: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1114,15 +1087,15 @@ class RobolabPolicyService:
         pim = self._pim
         if pim is None:
             return None
-        task_cluster = str(obs.get("online_task_cluster") or obs.get("prompt") or "")
-        session_id = str(obs.get("online_session_id") or task_cluster)
-        environment_seed = int(obs.get("online_environment_seed", -1))
-        attempt_id = int(obs.get("online_attempt_id", -1))
+        task_cluster = str(obs.get("pim_task_cluster") or obs.get("prompt") or "")
+        session_id = str(obs.get("pim_session_id") or task_cluster)
+        environment_seed = int(obs.get("pim_environment_seed", -1))
+        attempt_id = int(obs.get("pim_attempt_id", -1))
         if not task_cluster or environment_seed < 0 or attempt_id < 0:
             raise ValueError("PIM requires task_cluster, environment_seed, and attempt_id")
         requested_session = AttemptSessionKey(session_id, task_cluster, environment_seed)
-        reset_memory = bool(obs.get("online_memory_reset", False))
-        reset_replan = bool(obs.get("online_replan_reset", False))
+        reset_memory = bool(obs.get("pim_memory_reset", False))
+        reset_replan = bool(obs.get("pim_replan_reset", False))
         if reset_memory or self._pim_session_id != session_id:
             pim.reset_episode(task_cluster, attempt_id=attempt_id)
             self._pim_replan_open = False
@@ -1143,7 +1116,7 @@ class RobolabPolicyService:
                 )
             new_attempt = attempt_id == self._pim_attempt_id + 1
             if new_attempt and not reset_replan:
-                raise ValueError("A new PIM attempt must send online_replan_reset=true")
+                raise ValueError("A new PIM attempt must send pim_replan_reset=true")
             pim.begin_attempt(attempt_id)
             self._pim_attempt_id = attempt_id
             if new_attempt:
@@ -1153,8 +1126,8 @@ class RobolabPolicyService:
         merged = False
         if self._pim_replan_open:
             if not reset_replan:
-                completed = bool(obs.get("online_transition_complete", False))
-                executed = np.asarray(obs.get("online_executed_action", np.empty((0, 7))), dtype=np.float32)
+                completed = bool(obs.get("pim_transition_complete", False))
+                executed = np.asarray(obs.get("pim_executed_action", np.empty((0, 7))), dtype=np.float32)
                 expected_shape = (self._pim_executed_action_horizon, 7)
                 if completed and executed.shape != expected_shape:
                     raise ValueError(
@@ -1186,7 +1159,7 @@ class RobolabPolicyService:
 
         current_phase = phase[0].detach().float().cpu()
         pim_phase, pim_effect, pim_valid, scores = pim.query_tensors(current_phase)
-        replan_index = int(obs.get("online_replan_index", 0))
+        replan_index = int(obs.get("pim_replan_index", 0))
         replay_action: np.ndarray | None = None
         replay_phase_similarity: float | None = None
         if (
@@ -1249,10 +1222,10 @@ class RobolabPolicyService:
         pim = self._pim
         if pim is None:
             raise ValueError("PIM finalization requested while PIM is disabled")
-        session_id = str(obs.get("online_session_id") or "")
-        task_cluster = str(obs.get("online_task_cluster") or "")
-        environment_seed = int(obs.get("online_environment_seed", -1))
-        attempt_id = int(obs.get("online_attempt_id", -1))
+        session_id = str(obs.get("pim_session_id") or "")
+        task_cluster = str(obs.get("pim_task_cluster") or "")
+        environment_seed = int(obs.get("pim_environment_seed", -1))
+        attempt_id = int(obs.get("pim_attempt_id", -1))
         requested = AttemptSessionKey(session_id, task_cluster, environment_seed)
         if self._pim_session_key is None or self._pim_attempt_id is None:
             raise ValueError("cannot finalize PIM before a session has started")
@@ -1261,7 +1234,7 @@ class RobolabPolicyService:
             raise ValueError("PIM finalize attempt_id does not match the active attempt")
         committed = False
         merged = False
-        executed = np.asarray(obs.get("online_executed_action", np.empty((0, 7))), dtype=np.float32)
+        executed = np.asarray(obs.get("pim_executed_action", np.empty((0, 7))), dtype=np.float32)
         pending = self._pim_pending_start
         if (
             self._pim_replan_open
@@ -1279,7 +1252,7 @@ class RobolabPolicyService:
                     "attempt_id": attempt_id,
                 }
             )
-        if self._pim_replan_open and bool(obs.get("online_transition_complete", False)):
+        if self._pim_replan_open and bool(obs.get("pim_transition_complete", False)):
             expected_shape = (self._pim_executed_action_horizon, 7)
             if executed.shape != expected_shape:
                 raise ValueError(
@@ -1288,7 +1261,7 @@ class RobolabPolicyService:
                 )
             if pending is not None and np.isfinite(executed).all():
                 image = _extract_observation_image(obs)
-                features = self._stage2_oracle_features(obs, image)
+                features = self._causal_interaction_features(obs, image)
                 current_effect_post, current_effect_valid = features[-2], features[-1]
                 if current_effect_valid:
                     _, merged = pim.append_completed(
@@ -1299,7 +1272,7 @@ class RobolabPolicyService:
                         metadata=dict(pending.get("metadata", {})),
                     )
                     committed = True
-        terminal_outcome = str(obs.get("online_terminal_outcome") or "")
+        terminal_outcome = str(obs.get("pim_terminal_outcome") or "")
         locked_success_trace = False
         if (
             self._pim_success_replay_enabled
@@ -1348,10 +1321,10 @@ class RobolabPolicyService:
         pim = self._pim
         if pim is None:
             raise ValueError("PIM restore requested while PIM is disabled")
-        session_id = str(obs.get("online_session_id") or "")
-        task_cluster = str(obs.get("online_task_cluster") or "")
-        environment_seed = int(obs.get("online_environment_seed", -1))
-        last_attempt_id = int(obs.get("online_last_attempt_id", -1))
+        session_id = str(obs.get("pim_session_id") or "")
+        task_cluster = str(obs.get("pim_task_cluster") or "")
+        environment_seed = int(obs.get("pim_environment_seed", -1))
+        last_attempt_id = int(obs.get("pim_last_attempt_id", -1))
         phase = np.asarray(obs.get("restore_phase"), dtype=np.float32)
         effect = np.asarray(obs.get("restore_effect_post"), dtype=np.float32)
         n = phase.shape[0] if phase.ndim == 2 else -1
@@ -1453,35 +1426,35 @@ class RobolabPolicyService:
         log.info(f"[robolab-policy-server] pim_restore {info}")
         return info
 
-    def _finalize_online_attempt(self, obs: dict[str, Any]) -> dict[str, Any]:
+    def _finalize_transition_attempt(self, obs: dict[str, Any]) -> dict[str, Any]:
         """Commit a final full window, discard a partial one, then label the attempt."""
-        controller = self._online_controller
+        controller = self._transition_controller
         if controller is None:
-            raise ValueError("online_finalize_attempt requires online memory or shadow mode")
-        session_id = str(obs.get("online_session_id") or "")
-        task_cluster = str(obs.get("online_task_cluster") or "")
-        environment_seed = int(obs.get("online_environment_seed", -1))
-        attempt_id = int(obs.get("online_attempt_id", -1))
+            raise ValueError("pim_finalize_attempt requires transition memory or shadow mode")
+        session_id = str(obs.get("pim_session_id") or "")
+        task_cluster = str(obs.get("pim_task_cluster") or "")
+        environment_seed = int(obs.get("pim_environment_seed", -1))
+        attempt_id = int(obs.get("pim_attempt_id", -1))
         if not session_id or not task_cluster or environment_seed < 0 or attempt_id < 0:
             raise ValueError("finalize requires session_id, task_cluster, environment_seed, and attempt_id")
         requested_session = AttemptSessionKey(session_id, task_cluster, environment_seed)
-        if self._online_session_key is None or self._online_attempt_id is None:
-            raise ValueError("cannot finalize before an online-memory session has started")
-        self._online_session_key.assert_compatible(requested_session)
-        if attempt_id != self._online_attempt_id:
+        if self._transition_session_key is None or self._transition_attempt_id is None:
+            raise ValueError("cannot finalize before a transition-memory session has started")
+        self._transition_session_key.assert_compatible(requested_session)
+        if attempt_id != self._transition_attempt_id:
             raise ValueError(
-                f"finalize attempt_id mismatch: active={self._online_attempt_id}, requested={attempt_id}"
+                f"finalize attempt_id mismatch: active={self._transition_attempt_id}, requested={attempt_id}"
             )
 
         committed_terminal_transition = False
-        if self._online_replan_open:
-            completed = bool(obs.get("online_transition_complete", False))
-            executed_np = np.asarray(obs.get("online_executed_action", np.empty((0, 7))), dtype=np.float32)
-            pending = self._online_pending_start
+        if self._transition_replan_open:
+            completed = bool(obs.get("pim_transition_complete", False))
+            executed_np = np.asarray(obs.get("pim_executed_action", np.empty((0, 7))), dtype=np.float32)
+            pending = self._transition_pending_start
             if completed:
                 if executed_np.shape != (controller.schema.action_horizon, controller.schema.action_dim):
                     raise ValueError(
-                        "terminal online_transition_complete requires exactly [16,7] actions, "
+                        "terminal pim_transition_complete requires exactly [16,7] actions, "
                         f"got {executed_np.shape}"
                     )
                 if not np.isfinite(executed_np).all() or pending is None:
@@ -1495,7 +1468,7 @@ class RobolabPolicyService:
                     visual_key,
                     current_effect_post,
                     current_effect_valid,
-                ) = self._stage2_oracle_features(obs, _extract_observation_image(obs))
+                ) = self._causal_interaction_features(obs, _extract_observation_image(obs))
                 completed = bool(current_effect_valid)
             if completed:
                 assert pending is not None
@@ -1506,19 +1479,19 @@ class RobolabPolicyService:
                     executed_action=torch.from_numpy(np.ascontiguousarray(executed_np)),
                     next_visual_key=visual_key[0].detach(),
                     next_phase=phase[0].detach(),
-                    latent_index=int(obs.get("online_latent_index", 0)),
+                    latent_index=int(obs.get("pim_latent_index", 0)),
                     completed=True,
                     metadata=pending.get("metadata", {}),
                 )
             else:
                 controller.discard_open_replan()
-            self._online_replan_open = False
-            self._online_pending_start = None
+            self._transition_replan_open = False
+            self._transition_pending_start = None
 
-        outcome = str(obs.get("online_terminal_outcome") or "")
-        termination_reason = str(obs.get("online_termination_reason") or "")
-        total_steps = int(obs.get("online_total_steps", -1))
-        final_progress = float(obs.get("online_final_progress", -1.0))
+        outcome = str(obs.get("pim_terminal_outcome") or "")
+        termination_reason = str(obs.get("pim_termination_reason") or "")
+        total_steps = int(obs.get("pim_total_steps", -1))
+        final_progress = float(obs.get("pim_final_progress", -1.0))
         annotated = controller.memory.annotate_attempt_outcome(
             attempt_id,
             outcome=outcome,
@@ -1539,20 +1512,20 @@ class RobolabPolicyService:
             "annotated_transitions": annotated,
             "committed_terminal_transition": committed_terminal_transition,
             "memory_entries_total": len(controller.memory),
-            "conditioning": bool(controller.enabled and not self._online_shadow),
+            "conditioning": bool(controller.enabled and not self._transition_shadow),
         }
-        log.info(f"[robolab-policy-server] online_finalize {info}")
+        log.info(f"[robolab-policy-server] pim_finalize {info}")
         return info
 
-    def _restore_online_session(self, obs: dict[str, Any]) -> dict[str, Any]:
-        """Restore causally completed transitions from client-owned Phase-1 artifacts."""
-        controller = self._online_controller
+    def _restore_transition_session(self, obs: dict[str, Any]) -> dict[str, Any]:
+        """Restore causally completed transitions from attempt artifacts."""
+        controller = self._transition_controller
         if controller is None:
-            raise ValueError("online_restore_session requires online memory or shadow mode")
-        session_id = str(obs.get("online_session_id") or "")
-        task_cluster = str(obs.get("online_task_cluster") or "")
-        environment_seed = int(obs.get("online_environment_seed", -1))
-        last_attempt_id = int(obs.get("online_last_attempt_id", -1))
+            raise ValueError("pim_restore_session requires transition memory or shadow mode")
+        session_id = str(obs.get("pim_session_id") or "")
+        task_cluster = str(obs.get("pim_task_cluster") or "")
+        environment_seed = int(obs.get("pim_environment_seed", -1))
+        last_attempt_id = int(obs.get("pim_last_attempt_id", -1))
         if not session_id or not task_cluster or environment_seed < 0 or last_attempt_id < 0:
             raise ValueError("restore requires session/task/seed and a non-negative last_attempt_id")
 
@@ -1636,11 +1609,11 @@ class RobolabPolicyService:
                     },
                 )
             )
-        self._online_session_id = session_id
-        self._online_session_key = AttemptSessionKey(session_id, task_cluster, environment_seed)
-        self._online_attempt_id = last_attempt_id
-        self._online_replan_open = False
-        self._online_pending_start = None
+        self._transition_session_id = session_id
+        self._transition_session_key = AttemptSessionKey(session_id, task_cluster, environment_seed)
+        self._transition_attempt_id = last_attempt_id
+        self._transition_replan_open = False
+        self._transition_pending_start = None
         info = {
             "session_id": session_id,
             "task_cluster": task_cluster,
@@ -1648,9 +1621,9 @@ class RobolabPolicyService:
             "last_attempt_id": last_attempt_id,
             "restored_transitions": n,
             "memory_entries_total": len(controller.memory),
-            "conditioning": bool(controller.enabled and not self._online_shadow),
+            "conditioning": bool(controller.enabled and not self._transition_shadow),
         }
-        log.info(f"[robolab-policy-server] online_restore {info}")
+        log.info(f"[robolab-policy-server] pim_restore {info}")
         return info
 
     def _build_sample(self, obs: dict[str, Any]) -> dict[str, Any]:
@@ -1741,40 +1714,40 @@ class RobolabPolicyService:
         return sample
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
-        if bool(obs.get("online_restore_session", False)):
+        if bool(obs.get("pim_restore_session", False)):
             with self._lock:
                 restore_info = (
-                    self._restore_pim_session(obs) if self._pim_active else self._restore_online_session(obs)
+                    self._restore_pim_session(obs) if self._pim_active else self._restore_transition_session(obs)
                 )
-            phase0_contract = contract_manifest()
-            phase0_contract["memory_conditioning"] = bool(restore_info["conditioning"])
-            phase0_contract["memory_backend"] = "pim" if self._pim_active else "legacy_fifo"
-            return {"online_restore": restore_info, "phase0_contract": phase0_contract}
+            zeva_contract = contract_manifest()
+            zeva_contract["pim_conditioning"] = bool(restore_info["conditioning"])
+            zeva_contract["memory_backend"] = "pim" if self._pim_active else "transition_memory"
+            return {"pim_restore": restore_info, "zeva_contract": zeva_contract}
 
-        if bool(obs.get("online_finalize_attempt", False)):
+        if bool(obs.get("pim_finalize_attempt", False)):
             with self._lock:
                 with torch.inference_mode():
                     finalize_info = (
-                        self._finalize_pim_attempt(obs) if self._pim_active else self._finalize_online_attempt(obs)
+                        self._finalize_pim_attempt(obs) if self._pim_active else self._finalize_transition_attempt(obs)
                     )
-            phase0_contract = contract_manifest()
-            phase0_contract["memory_conditioning"] = bool(finalize_info["conditioning"])
-            phase0_contract["memory_backend"] = "pim" if self._pim_active else "legacy_fifo"
-            return {"online_finalize": finalize_info, "phase0_contract": phase0_contract}
+            zeva_contract = contract_manifest()
+            zeva_contract["pim_conditioning"] = bool(finalize_info["conditioning"])
+            zeva_contract["memory_backend"] = "pim" if self._pim_active else "transition_memory"
+            return {"pim_finalize": finalize_info, "zeva_contract": zeva_contract}
 
         sample = self._build_sample(obs)
         requested_seed = obs.get("inference_seed")
         seed = self._next_seed() if requested_seed is None else int(requested_seed)
         if seed < 0 or seed >= 2**32:
             raise ValueError("inference_seed must be in uint32 range")
-        online_info: dict[str, Any] | None = None
+        transition_info: dict[str, Any] | None = None
         pim_info: dict[str, Any] | None = None
         pim_replay_action: np.ndarray | None = None
-        behavior_features: dict[str, Any] | None = None
+        cte_features: dict[str, Any] | None = None
 
         with self._lock:
             with torch.inference_mode():
-                if self._stage2_oracle_enabled:
+                if self._zeva_enabled:
                     (
                         global_feature,
                         phase,
@@ -1783,14 +1756,14 @@ class RobolabPolicyService:
                         visual_key,
                         current_effect_post,
                         current_effect_valid,
-                    ) = self._stage2_oracle_features(
+                    ) = self._causal_interaction_features(
                         obs, _extract_observation_image(obs)
                     )
                     sample["behavior_global"] = global_feature[0].cpu()
                     sample["behavior_phase"] = phase[0].cpu()
                     sample["behavior_effect"] = effect[0].cpu()
                     sample["behavior_effect_valid"] = effect_valid[0].cpu()
-                    behavior_features = {
+                    cte_features = {
                         "global": global_feature[0].detach().float().cpu().numpy(),
                         "phase": phase[0].detach().float().cpu().numpy(),
                         "effect_history": effect[0].detach().float().cpu().numpy(),
@@ -1799,23 +1772,22 @@ class RobolabPolicyService:
                         "latest_effect_valid": bool(current_effect_valid),
                         "effect_history_valid": effect_valid[0].detach().cpu().numpy(),
                     }
-                    online_readout = self._online_context(
+                    transition_readout = self._transition_context(
                         obs,
                         phase,
                         visual_key,
                         current_effect_post,
                         current_effect_valid,
                     )
-                    if online_readout is not None:
-                        online_context, online_info = online_readout
-                        if self._online_shadow:
-                            online_context = torch.zeros_like(online_context)
+                    if transition_readout is not None:
+                        transition_context, transition_info = transition_readout
+                        if self._transition_shadow:
+                            transition_context = torch.zeros_like(transition_context)
                         if self._model_has_online_prefix:
-                            sample["behavior_online_context"] = online_context[0].detach().cpu()
+                            sample["behavior_online_context"] = transition_context[0].detach().cpu()
                     elif self._model_has_online_prefix:
-                        # A formal Stage-2.5 checkpoint always has the new
-                        # prefix slot.  No-memory baseline uses an exact zero
-                        # context, preserving the frozen Stage-2 path.
+                        # Policies without a transition-memory readout receive
+                        # an exact zero context.
                         sample["behavior_online_context"] = torch.zeros((256,), dtype=torch.float32)
                     pim_diagnostic_skip_lifecycle = bool(
                         obs.get("pim_diagnostic_skip_lifecycle", False)
@@ -1844,7 +1816,7 @@ class RobolabPolicyService:
                         sample["behavior_pim_effect"] = pim_effect[0].cpu()
                         sample["behavior_pim_valid"] = pim_valid[0].cpu()
                 elif self._model_has_online_prefix or self._model_has_pim:
-                    raise RuntimeError("Loaded memory policy requires Stage-2 behavior features")
+                    raise RuntimeError("Loaded PIM policy requires CTE features")
                 data_batch = _build_data_batch_from_sample(sample)
                 log.info(f"[robolab-policy-server] prompt={data_batch['ai_caption'][0]!r} seed={seed}")
                 samples = self.model.generate_samples_from_batch(
@@ -1860,7 +1832,7 @@ class RobolabPolicyService:
         action_np = action.detach().cpu().numpy()  # [T2,D]
         if self.cfg.action_dim == 7 and action_np.shape[0] != PREDICTED_ACTION_HORIZON:
             raise RuntimeError(
-                f"Phase-0 RoboCasa server must predict {PREDICTED_ACTION_HORIZON} actions, "
+                f"Zeva RoboCasa server must predict {PREDICTED_ACTION_HORIZON} actions, "
                 f"got {action_np.shape}"
             )
         if pim_replay_action is not None:
@@ -1911,20 +1883,20 @@ class RobolabPolicyService:
             quat_xyzw = convert_rotation(abs_pose[1:, :3, :3], "matrix", "quat_xyzw")
             action_np = np.concatenate([position, quat_xyzw, action_np[:, 9:]], axis=-1)
 
-        phase0_contract = contract_manifest()
-        phase0_contract.update(
+        zeva_contract = contract_manifest()
+        zeva_contract.update(
             {
                 "inference_seed": seed,
-                "memory_conditioning": bool(
+                "pim_conditioning": bool(
                     (
-                        self._online_controller is not None
-                        and self._online_controller.enabled
-                        and not self._online_shadow
+                        self._transition_controller is not None
+                        and self._transition_controller.enabled
+                        and not self._transition_shadow
                     )
                     or (self._pim_conditioning and not self._pim_shadow)
                 ),
                 "memory_backend": (
-                    "pim" if self._pim_active else ("legacy_fifo" if self._online_enabled else "none")
+                    "pim" if self._pim_active else ("transition_memory" if self._transition_enabled else "none")
                 ),
                 "pim_model_hard_bypass": bool(
                     self._pim_active and getattr(self, "_pim_model_hard_bypass", False)
@@ -1934,13 +1906,13 @@ class RobolabPolicyService:
                 ),
             }
         )
-        outputs: dict[str, Any] = {"action": action_np, "phase0_contract": phase0_contract}
-        if online_info is not None:
-            outputs["online_memory"] = online_info
+        outputs: dict[str, Any] = {"action": action_np, "zeva_contract": zeva_contract}
+        if transition_info is not None:
+            outputs["transition_memory"] = transition_info
         if pim_info is not None:
             outputs["pim"] = pim_info
-        if behavior_features is not None:
-            outputs["behavior_features"] = behavior_features
+        if cte_features is not None:
+            outputs["cte_features"] = cte_features
         if self.cfg.decode_video:
             pred_vision_latent = samples["vision"][0]  # [C,T,H,W]
             video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]

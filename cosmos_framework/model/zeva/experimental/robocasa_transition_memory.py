@@ -22,20 +22,20 @@ ROBOCASA_ATOMIC5_TASKS = (
 
 def make_robocasa_atomic5_schema(
     *,
-    vbe_hash: str = "",
+    cte_hash: str = "",
     vae_temporal_hash: str = "",
     capacity: int = 64,
     top_k: int = 4,
 ) -> TransitionMemorySchema:
-    """Return the single schema accepted by Atomic-5 online memory.
+    """Return the Atomic-5 transition-memory schema.
 
-    ``vbe_hash`` and ``vae_temporal_hash`` are part of the schema hash.  A
-    runtime/cache produced with a different Stage-1 or temporal contract is
+    ``cte_hash`` and ``vae_temporal_hash`` are part of the schema hash.  A
+    runtime/cache produced with a different CTE or temporal contract is
     therefore rejected instead of silently mixing representations.
     """
 
     return TransitionMemorySchema(
-        version="robocasa_atomic5_online_memory_v1",
+        version="robocasa_atomic5_transition_memory_v1",
         task_contract="robocasa365_atomic5_5task_left_wrist_arm7_20hz_cosmos32_exec16",
         phase_dim=128,
         visual_key_dim=128,
@@ -44,6 +44,6 @@ def make_robocasa_atomic5_schema(
         action_horizon=16,
         capacity=int(capacity),
         top_k=int(top_k),
-        vbe_hash=str(vbe_hash),
+        cte_hash=str(cte_hash),
         vae_temporal_hash=str(vae_temporal_hash),
     )

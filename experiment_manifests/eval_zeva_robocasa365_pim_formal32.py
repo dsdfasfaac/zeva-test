@@ -194,8 +194,8 @@ def main() -> None:
         # controls between them.  The policy server derives a first effect
         # only after four such transitions (16 executed controls).
         initial_policy_obs, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-        behavior_boundary_images: list[np.ndarray] = [initial_policy_obs["observation/image"].copy()]
-        behavior_transitions: list[np.ndarray] = []
+        cte_boundary_images: list[np.ndarray] = [initial_policy_obs["observation/image"].copy()]
+        cte_transitions: list[np.ndarray] = []
         pending_transition_actions: list[np.ndarray] = []
         actions_since_replan: list[np.ndarray] = []
         pim_query_info: list[dict] = []
@@ -206,13 +206,13 @@ def main() -> None:
         steps = 0
         while steps < args.max_steps and not success and not done:
             policy_obs, left_frame = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-            policy_obs["behavior_boundary_images"] = np.stack(behavior_boundary_images, axis=0)
-            policy_obs["behavior_transition_actions"] = (
-                np.stack(behavior_transitions, axis=0)
-                if behavior_transitions
+            policy_obs["cte_boundary_images"] = np.stack(cte_boundary_images, axis=0)
+            policy_obs["cte_transition_actions"] = (
+                np.stack(cte_transitions, axis=0)
+                if cte_transitions
                 else np.empty((0, 4, 7), dtype=np.float32)
             )
-            policy_obs["behavior_reset"] = steps == 0
+            policy_obs["cte_reset"] = steps == 0
             if not args.no_video:
                 frames.append(left_frame.copy())
             if not action_queue:
@@ -226,28 +226,28 @@ def main() -> None:
                 if args.pim_formal32:
                     policy_obs.update(
                         {
-                            "online_session_id": f"formal32:{args.task}:{episode_seed}",
-                            "online_task_cluster": args.task,
-                            "online_environment_seed": episode_seed,
-                            "online_attempt_id": 0,
-                            "online_memory_reset": steps == 0,
-                            "online_replan_reset": False,
-                            "online_latent_index": steps,
-                            "online_replan_index": len(query_times),
-                            "online_executed_action": np.asarray(
+                            "pim_session_id": f"formal32:{args.task}:{episode_seed}",
+                            "pim_task_cluster": args.task,
+                            "pim_environment_seed": episode_seed,
+                            "pim_attempt_id": 0,
+                            "pim_memory_reset": steps == 0,
+                            "pim_replan_reset": False,
+                            "pim_latent_index": steps,
+                            "pim_replan_index": len(query_times),
+                            "pim_executed_action": np.asarray(
                                 actions_since_replan, dtype=np.float32
                             ).reshape(-1, 7),
-                            "online_transition_complete": len(actions_since_replan) == 32,
+                            "pim_transition_complete": len(actions_since_replan) == 32,
                         }
                     )
                 start = time.monotonic()
                 output = client.infer(policy_obs)
                 query_times.append(time.monotonic() - start)
                 if args.pim_formal32:
-                    contract = output.get("phase0_contract")
+                    contract = output.get("zeva_contract")
                     if not isinstance(contract, dict):
-                        raise ValueError("PIM server did not return phase0_contract")
-                    observed_conditioning = bool(contract.get("memory_conditioning", False))
+                        raise ValueError("PIM server did not return zeva_contract")
+                    observed_conditioning = bool(contract.get("pim_conditioning", False))
                     expected_conditioning = args.expected_pim_conditioning == "on"
                     if (
                         contract.get("memory_backend") != "pim"
@@ -279,41 +279,41 @@ def main() -> None:
             pending_transition_actions.append(executed_action.astype(np.float32, copy=True))
             if len(pending_transition_actions) == 4:
                 boundary_policy_obs, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-                behavior_boundary_images.append(boundary_policy_obs["observation/image"].copy())
-                behavior_transitions.append(np.stack(pending_transition_actions, axis=0))
+                cte_boundary_images.append(boundary_policy_obs["observation/image"].copy())
+                cte_transitions.append(np.stack(pending_transition_actions, axis=0))
                 pending_transition_actions.clear()
             steps += 1
 
         if args.pim_formal32:
             final_policy_obs, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
-            final_policy_obs["behavior_boundary_images"] = np.stack(behavior_boundary_images, axis=0)
-            final_policy_obs["behavior_transition_actions"] = (
-                np.stack(behavior_transitions, axis=0)
-                if behavior_transitions
+            final_policy_obs["cte_boundary_images"] = np.stack(cte_boundary_images, axis=0)
+            final_policy_obs["cte_transition_actions"] = (
+                np.stack(cte_transitions, axis=0)
+                if cte_transitions
                 else np.empty((0, 4, 7), dtype=np.float32)
             )
             final_policy_obs.update(
                 {
-                    "online_finalize_attempt": True,
-                    "online_session_id": f"formal32:{args.task}:{episode_seed}",
-                    "online_task_cluster": args.task,
-                    "online_environment_seed": episode_seed,
-                    "online_attempt_id": 0,
-                    "online_latent_index": steps,
-                    "online_executed_action": np.asarray(
+                    "pim_finalize_attempt": True,
+                    "pim_session_id": f"formal32:{args.task}:{episode_seed}",
+                    "pim_task_cluster": args.task,
+                    "pim_environment_seed": episode_seed,
+                    "pim_attempt_id": 0,
+                    "pim_latent_index": steps,
+                    "pim_executed_action": np.asarray(
                         actions_since_replan, dtype=np.float32
                     ).reshape(-1, 7),
-                    "online_transition_complete": len(actions_since_replan) == 32,
-                    "online_terminal_outcome": "success" if success else "failure",
-                    "online_termination_reason": "success" if success else (
+                    "pim_transition_complete": len(actions_since_replan) == 32,
+                    "pim_terminal_outcome": "success" if success else "failure",
+                    "pim_termination_reason": "success" if success else (
                         "env_done" if done else "max_steps"
                     ),
-                    "online_total_steps": steps,
-                    "online_final_progress": 1.0 if success else 0.0,
+                    "pim_total_steps": steps,
+                    "pim_final_progress": 1.0 if success else 0.0,
                 }
             )
             finalize_output = client.infer(final_policy_obs)
-            if not isinstance(finalize_output.get("online_finalize"), dict):
+            if not isinstance(finalize_output.get("pim_finalize"), dict):
                 raise ValueError("PIM server did not acknowledge attempt finalization")
 
         env.close()

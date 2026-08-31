@@ -9,12 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-PROTOCOL_VERSION = "robocasa_atomic5_tts_phase0_v1"
+PROTOCOL_VERSION = "zeva_robocasa_atomic5_v1"
 PREDICTED_ACTION_HORIZON = 32
 EXECUTED_ACTION_HORIZON = 16
 EFFECT_ACTION_HORIZON = 16
-VBE_TRANSITION_ACTION_HORIZON = 4
-EFFECT_VBE_TRANSITIONS = 4
+CTE_TRANSITION_ACTION_HORIZON = 4
+EFFECT_CTE_TRANSITIONS = 4
 MAX_CONTROLS_PER_ATTEMPT = 300
 REQUIRED_WARMUP_REQUESTS = 1
 
@@ -71,8 +71,8 @@ def contract_manifest() -> dict[str, int | str]:
         "predicted_action_horizon": PREDICTED_ACTION_HORIZON,
         "executed_action_horizon": EXECUTED_ACTION_HORIZON,
         "effect_action_horizon": EFFECT_ACTION_HORIZON,
-        "vbe_transition_action_horizon": VBE_TRANSITION_ACTION_HORIZON,
-        "effect_vbe_transitions": EFFECT_VBE_TRANSITIONS,
+        "cte_transition_action_horizon": CTE_TRANSITION_ACTION_HORIZON,
+        "effect_cte_transitions": EFFECT_CTE_TRANSITIONS,
         "max_controls_per_attempt": MAX_CONTROLS_PER_ATTEMPT,
         "discarded_warmup_requests": REQUIRED_WARMUP_REQUESTS,
     }

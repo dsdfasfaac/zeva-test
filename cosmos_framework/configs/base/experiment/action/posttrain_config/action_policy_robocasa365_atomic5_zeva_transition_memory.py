@@ -16,14 +16,14 @@ import copy
 
 from hydra.core.config_store import ConfigStore
 
-from cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva_stage2 import (
-    action_policy_robocasa365_atomic5_zeva_stage2,
+from cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robocasa365_atomic5_zeva import (
+    action_policy_robocasa365_atomic5_zeva,
 )
 
 cs = ConfigStore.instance()
 
 action_policy_robocasa365_atomic5_zeva_transition_memory = copy.deepcopy(
-    action_policy_robocasa365_atomic5_zeva_stage2
+    action_policy_robocasa365_atomic5_zeva
 )
 action_policy_robocasa365_atomic5_zeva_transition_memory["job"].update(
     project="zeva",
