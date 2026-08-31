@@ -15,8 +15,8 @@ from dataclasses import asdict, dataclass
 
 import torch
 from torch import Tensor, nn
-from torch.utils.checkpoint import checkpoint
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 @dataclass
@@ -35,7 +35,9 @@ class BehaviorEncoderConfig:
     num_heads: int = 8
     image_channels: int = 3
     ema_decay: float = 0.996
-    use_mamba: bool = True
+    # GRU is the stable/default RoboCasa lineage. Mamba remains opt-in so that
+    # installing mamba_ssm cannot silently change the checkpoint architecture.
+    use_mamba: bool = False
     vision_chunk_size: int = 256
     vision_gradient_checkpointing: bool = True
     vision_checkpoint_threshold: int = 1024
@@ -182,7 +184,7 @@ class _TriStreamBlock(nn.Module):
         return visual * mask, action * mask, behavior * mask
 
 
-class VisualBehaviorEncoder(nn.Module):
+class CausalTransitionEncoder(nn.Module):
     """Causal VBE with EMA visual target encoder and two memory-bank projections."""
 
     def __init__(self, cfg: BehaviorEncoderConfig | None = None) -> None:
@@ -368,3 +370,8 @@ class VisualBehaviorEncoder(nn.Module):
             "target_visual": target_visual,
             "transition_complete": transition_complete,
         }
+
+
+# Backward-compatible engineering name.  Class names do not participate in
+# state-dict keys, so old checkpoints retain the identical parameter schema.
+VisualBehaviorEncoder = CausalTransitionEncoder

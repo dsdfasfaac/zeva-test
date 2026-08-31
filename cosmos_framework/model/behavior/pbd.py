@@ -26,6 +26,25 @@ class ActionPriorConfig:
     min_std: float = 1e-3
 
 
+@dataclass(frozen=True)
+class BriefInteractionTrace:
+    """Paper-aligned BIT: the ordered effects completed in the current attempt.
+
+    ``effects`` and ``valid`` intentionally retain the tensor layout already
+    used by released Stage-2 checkpoints, so adopting the paper name does not
+    change any parameter names or numerical behavior.
+    """
+
+    effects: Tensor
+    valid: Tensor
+
+    def __post_init__(self) -> None:
+        if self.effects.ndim != 3:
+            raise ValueError("BIT effects must be [B,L,D]")
+        if self.valid.shape != self.effects.shape[:2]:
+            raise ValueError("BIT valid mask must be [B,L]")
+
+
 class ActionPriorNetwork(nn.Module):
     """PBD: global anchors queried by phase fused with ordered causal effects."""
 
@@ -71,9 +90,18 @@ class ActionPriorNetwork(nn.Module):
         nn.init.normal_(self.bos_effect, std=0.02)
 
     def forward(
-        self, z_global: Tensor, z_phase: Tensor, z_effect: Tensor, effect_valid: Tensor | None = None
+        self,
+        z_global: Tensor,
+        z_phase: Tensor,
+        z_effect: Tensor | BriefInteractionTrace,
+        effect_valid: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Return Gaussian mean and std, both ``[B,horizon,action_dim]``."""
+        if isinstance(z_effect, BriefInteractionTrace):
+            if effect_valid is not None:
+                raise ValueError("Pass either BriefInteractionTrace or effect_valid, not both")
+            effect_valid = z_effect.valid
+            z_effect = z_effect.effects
         if z_global.ndim != 2 or z_global.shape[-1] != self.cfg.global_dim:
             raise ValueError(f"Expected z_global [B,{self.cfg.global_dim}], got {tuple(z_global.shape)}")
         if z_phase.ndim != 2 or z_phase.shape != (z_global.shape[0], self.cfg.phase_dim):

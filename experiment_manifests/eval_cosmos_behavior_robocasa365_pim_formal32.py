@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Closed-loop RoboCasa365 evaluator for the released Atomic-5 policy."""
+"""Closed-loop RoboCasa365 evaluation client for the Cosmos3 atomic5 policy."""
 
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import time
@@ -16,8 +17,15 @@ import numpy as np
 from openpi_client.websocket_client_policy import WebsocketClientPolicy
 
 import robocasa  # noqa: F401
+# Gymnasium registration for the Panda-Omron adapter resides in this module
+# rather than in RoboCasa's package initializer.
 import robocasa.wrappers.gym_wrapper  # noqa: F401
 from robocasa.utils.env_utils import convert_action
+
+
+# Native MuJoCo/EGL failures otherwise exit with SIGABRT and no actionable
+# Python context.  This has no effect on rollout numerics or the protocol.
+faulthandler.enable(all_threads=True)
 
 
 TASK_PROMPTS = {
@@ -71,12 +79,10 @@ def prepare_policy_observation(obs: dict, prompt: str) -> tuple[dict, np.ndarray
 def env_step(env, arm_action: np.ndarray):
     arm_action = np.asarray(arm_action, dtype=np.float32)
     if arm_action.shape != (7,) or not np.isfinite(arm_action).all():
-        raise ValueError(
-            f"Invalid arm7 action: shape={arm_action.shape}, finite={np.isfinite(arm_action).all()}"
-        )
-    simulator_action = np.zeros(12, dtype=np.float32)
-    simulator_action[:7] = np.clip(arm_action, -1.0, 1.0)
-    result = env.step(convert_action(simulator_action))
+        raise ValueError(f"Invalid arm7 action: shape={arm_action.shape}, finite={np.isfinite(arm_action).all()}")
+    raw = np.zeros(12, dtype=np.float32)
+    raw[:7] = np.clip(arm_action, -1.0, 1.0)
+    result = env.step(convert_action(raw))
     if len(result) == 5:
         obs, reward, terminated, truncated, info = result
         done = bool(terminated or truncated)
@@ -91,7 +97,9 @@ def save_video(frames: list[np.ndarray], path: Path, fps: int = 20) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     height, width = frames[0].shape[:2]
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+    )
     if not writer.isOpened():
         raise RuntimeError(f"Could not open video writer for {path}")
     try:
@@ -111,6 +119,7 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--seed", type=int, default=195)
     parser.add_argument("--max-steps", type=int, default=300)
+    parser.add_argument("--open-loop-steps", type=int, default=10)
     parser.add_argument(
         "--pim-formal32",
         action="store_true",
@@ -120,10 +129,10 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--open-loop-steps",
-        type=int,
-        default=32,
-        help="Execute the complete 32-action training chunk; shorter values invalidate comparison.",
+        "--expected-pim-conditioning",
+        choices=("on", "off"),
+        default="on",
+        help="Require PIM injection to be active or shadow-gated while retaining PIM lifecycle fields.",
     )
     parser.add_argument("--split", default="target")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -134,6 +143,15 @@ def main() -> None:
         help="MuJoCo EGL device index visible to this evaluator (-1: automatic).",
     )
     parser.add_argument("--no-video", action="store_true")
+    parser.add_argument(
+        "--inference-seed-prefix-json",
+        type=Path,
+        help=(
+            "Optional JSON array of exact policy seeds to replay before "
+            "returning to the server's untouched RNG stream. This is only "
+            "for infrastructure recovery after a native renderer abort."
+        ),
+    )
     args = parser.parse_args()
     if args.pim_formal32 and args.open_loop_steps != 32:
         raise ValueError("--pim-formal32 requires --open-loop-steps=32")
@@ -142,6 +160,12 @@ def main() -> None:
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     client = WebsocketClientPolicy(args.host, args.port)
+    replay_seed_prefix = (
+        [int(value) for value in json.loads(args.inference_seed_prefix_json.read_text())]
+        if args.inference_seed_prefix_json is not None
+        else []
+    )
+    replay_seed_index = 0
     results = []
 
     for episode_idx in range(args.episodes):
@@ -158,11 +182,17 @@ def main() -> None:
             randomize_cameras=False,
             translucent_robot=False,
         )
+        # Match the official RoboCasa365 RLDX harness: the seed is supplied to
+        # gym.make(), whose constructor performs an initial reset, and rollout
+        # then calls reset() without rewinding the environment RNG a second time.
         reset = env.reset()
         obs = reset[0] if isinstance(reset, tuple) else reset
         frames: list[np.ndarray] = []
         action_queue: deque[np.ndarray] = deque()
-
+        # Stage-2 VBE is defined at Wan's four-control cadence.  Retain only
+        # observations at raw offsets 0,4,8,... and the *executed* arm7
+        # controls between them.  The policy server derives a first effect
+        # only after four such transitions (16 executed controls).
         initial_policy_obs, _ = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
         behavior_boundary_images: list[np.ndarray] = [initial_policy_obs["observation/image"].copy()]
         behavior_transitions: list[np.ndarray] = []
@@ -172,8 +202,8 @@ def main() -> None:
         query_times = []
         success = False
         done = False
-        steps = 0
 
+        steps = 0
         while steps < args.max_steps and not success and not done:
             policy_obs, left_frame = prepare_policy_observation(obs, TASK_PROMPTS[args.task])
             policy_obs["behavior_boundary_images"] = np.stack(behavior_boundary_images, axis=0)
@@ -186,6 +216,13 @@ def main() -> None:
             if not args.no_video:
                 frames.append(left_frame.copy())
             if not action_queue:
+                requested_inference_seed = None
+                if replay_seed_index < len(replay_seed_prefix):
+                    requested_inference_seed = replay_seed_prefix[replay_seed_index]
+                    if requested_inference_seed < 0 or requested_inference_seed >= 2**32:
+                        raise ValueError("Recovery inference seed must be in uint32 range")
+                    policy_obs["inference_seed"] = requested_inference_seed
+                    replay_seed_index += 1
                 if args.pim_formal32:
                     policy_obs.update(
                         {
@@ -210,10 +247,23 @@ def main() -> None:
                     contract = output.get("phase0_contract")
                     if not isinstance(contract, dict):
                         raise ValueError("PIM server did not return phase0_contract")
-                    if contract.get("memory_backend") != "pim" or not bool(
-                        contract.get("memory_conditioning", False)
+                    observed_conditioning = bool(contract.get("memory_conditioning", False))
+                    expected_conditioning = args.expected_pim_conditioning == "on"
+                    if (
+                        contract.get("memory_backend") != "pim"
+                        or observed_conditioning != expected_conditioning
                     ):
-                        raise ValueError(f"PIM conditioning is not active: {contract}")
+                        raise ValueError(
+                            "PIM conditioning mode mismatch: "
+                            f"expected={expected_conditioning}, contract={contract}"
+                        )
+                    if requested_inference_seed is not None and int(
+                        contract.get("inference_seed", -1)
+                    ) != requested_inference_seed:
+                        raise ValueError(
+                            "Server did not honor recovery inference seed: "
+                            f"requested={requested_inference_seed}, contract={contract}"
+                        )
                     info = output.get("pim")
                     if not isinstance(info, dict):
                         raise ValueError("PIM server did not return retrieval metadata")
@@ -279,6 +329,7 @@ def main() -> None:
             "pim_entries_last": (
                 int(pim_query_info[-1].get("entries_total", 0)) if pim_query_info else 0
             ),
+            "infrastructure_recovery_seed_prefix": replay_seed_prefix,
         }
         results.append(record)
         with (args.output_dir / "episodes.jsonl").open("a") as file:
@@ -286,8 +337,7 @@ def main() -> None:
         if not args.no_video:
             save_video(
                 frames,
-                args.output_dir
-                / f"ep_{episode_idx:03d}_seed_{episode_seed}_{'success' if success else 'fail'}.mp4",
+                args.output_dir / f"ep_{episode_idx:03d}_seed_{episode_seed}_{'success' if success else 'fail'}.mp4",
             )
         print(json.dumps(record), flush=True)
 
@@ -298,13 +348,7 @@ def main() -> None:
         "success_rate": float(np.mean([item["success"] for item in results])),
         "mean_steps": float(np.mean([item["steps"] for item in results])),
         "mean_query_seconds": float(
-            np.mean(
-                [
-                    item["mean_query_seconds"]
-                    for item in results
-                    if item["mean_query_seconds"] is not None
-                ]
-            )
+            np.mean([item["mean_query_seconds"] for item in results if item["mean_query_seconds"] is not None])
         ),
     }
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

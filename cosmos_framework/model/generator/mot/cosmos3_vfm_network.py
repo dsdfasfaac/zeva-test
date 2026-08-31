@@ -11,7 +11,15 @@ from transformers.modeling_utils import PreTrainedModel
 
 from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
 from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
-from cosmos_framework.model.behavior import ActionPriorConfig, ActionPriorNetwork, BehaviorActionAdapter
+from cosmos_framework.model.behavior import (
+    ActionPriorConfig,
+    ActionPriorNetwork,
+    BehaviorActionAdapter,
+    BriefInteractionTrace,
+    CausalPromptConfig,
+    CausalPromptEncoder,
+    inject_causal_prompt,
+)
 from cosmos_framework.model.generator.mot.attention import SplitInfo, build_packed_sequence
 from cosmos_framework.model.generator.mot.context_parallel_utils import (
     get_context_parallel_last_hidden_state,
@@ -197,6 +205,31 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             self.behavior_global_projector: nn.Linear | None = nn.Linear(
                 prior_cfg.global_dim, self.hidden_size, bias=True
             )
+            pim_enabled = bool(behavior_cfg.get("pim_memory_enabled", False))
+            pim_dim = int(behavior_cfg.get("pim_context_dim", 256))
+            self.behavior_pim_encoder: CausalPromptEncoder | None = (
+                CausalPromptEncoder(
+                    CausalPromptConfig(
+                        global_dim=prior_cfg.global_dim,
+                        phase_dim=prior_cfg.phase_dim,
+                        effect_dim=prior_cfg.effect_dim,
+                        brief_length=prior_cfg.effect_history_length,
+                        persistent_length=int(behavior_cfg.get("pim_persistent_length", 4)),
+                        hidden_dim=pim_dim,
+                        num_heads=int(behavior_cfg.get("num_heads", 4)),
+                    )
+                )
+                if pim_enabled
+                else None
+            )
+            self.behavior_pim_projector: nn.Linear | None = (
+                nn.Linear(pim_dim, self.hidden_size, bias=True) if pim_enabled else None
+            )
+            self.behavior_pim_gate: nn.Parameter | None = (
+                nn.Parameter(torch.empty(1)) if pim_enabled else None
+            )
+            self.behavior_pim_gate_init = float(behavior_cfg.get("pim_gate_init", 0.0))
+            self.behavior_pim_force_bypass = bool(behavior_cfg.get("pim_force_bypass", False))
             online_enabled = bool(behavior_cfg.get("online_memory_enabled", False))
             online_dim = int(behavior_cfg.get("online_context_dim", 256))
             self.behavior_online_projector: nn.Linear | None = (
@@ -213,6 +246,11 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             self.behavior_pbd = None
             self.behavior_adapter = None
             self.behavior_global_projector = None
+            self.behavior_pim_encoder = None
+            self.behavior_pim_projector = None
+            self.behavior_pim_gate = None
+            self.behavior_pim_gate_init = 0.0
+            self.behavior_pim_force_bypass = False
             self.behavior_online_projector = None
             self.behavior_prior_dropout_rate = 0.0
             self.behavior_prior_inference_guidance_scale = 1.0
@@ -244,6 +282,21 @@ class Cosmos3VFMNetwork(PreTrainedModel):
 
         self.config = config
         self.parallel_dims = None
+
+    @property
+    def causal_prompt_encoder(self) -> CausalPromptEncoder | None:
+        """Paper-facing alias; storage keeps the legacy checkpoint key."""
+        return self.behavior_pim_encoder
+
+    @property
+    def causal_prompt_projector(self) -> nn.Linear | None:
+        """Project the fused causal prompt into the frozen policy prefix."""
+        return self.behavior_pim_projector
+
+    @property
+    def causal_prompt_gate(self) -> nn.Parameter | None:
+        """Zero-initialized policy-injection gate for the causal prompt."""
+        return self.behavior_pim_gate
 
     def init_weights(self, buffer_device: torch.device | None):
         if self.config.vision_gen or self.config.action_gen or self.config.sound_gen:
@@ -288,6 +341,15 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             self.behavior_adapter.init_weights()
             nn.init.xavier_uniform_(self.behavior_global_projector.weight)
             nn.init.zeros_(self.behavior_global_projector.bias)
+            if (
+                self.behavior_pim_encoder is not None
+                and self.behavior_pim_projector is not None
+                and self.behavior_pim_gate is not None
+            ):
+                self.behavior_pim_encoder.reset_parameters()
+                nn.init.xavier_uniform_(self.behavior_pim_projector.weight)
+                nn.init.zeros_(self.behavior_pim_projector.bias)
+                nn.init.constant_(self.behavior_pim_gate, self.behavior_pim_gate_init)
             if self.behavior_online_projector is not None:
                 # Zero initialization makes enabling memory a strict no-op
                 # until the support-memory adaptation stage trains this path.
@@ -675,6 +737,45 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 f"got {tuple(global_features.shape)} for {packed_seq.behavior_indexes.numel()} slots"
             )
         prefix = self.behavior_global_projector(global_features).to(target_dtype)
+        if self.behavior_pim_encoder is not None and not self.behavior_pim_force_bypass:
+            required = (
+                "behavior_phase",
+                "behavior_effect",
+                "behavior_effect_valid",
+                "behavior_pim_phase",
+                "behavior_pim_effect",
+                "behavior_pim_valid",
+            )
+            if any(not hasattr(packed_seq, name) for name in required):
+                raise ValueError("PIM-enabled behavior prefix requires phase, BIT, and PIM tensors")
+            assert self.behavior_pim_projector is not None
+            assert self.behavior_pim_gate is not None
+            brief_interaction_trace = BriefInteractionTrace(
+                effects=packed_seq.behavior_effect,
+                valid=packed_seq.behavior_effect_valid,
+            )
+            causal_prompt_context = self.behavior_pim_encoder(
+                global_features,
+                packed_seq.behavior_phase,
+                brief_interaction_trace.effects,
+                brief_interaction_trace.valid,
+                packed_seq.behavior_pim_phase,
+                packed_seq.behavior_pim_effect,
+                packed_seq.behavior_pim_valid,
+            )
+            # Do not synthesize a residual from BOS slots when no persistent
+            # evidence exists.  The scalar tanh gate is exactly zero at
+            # initialization, preserving the released prefix bit-for-bit while
+            # letting the scalar gate learn first; encoder/projector gradients
+            # become active once that gate leaves zero.
+            causal_prompt = self.behavior_pim_projector(causal_prompt_context)
+            prefix = inject_causal_prompt(
+                prefix, causal_prompt, self.behavior_pim_gate, packed_seq.behavior_pim_valid
+            )
+            # Keep the legacy field for existing diagnostics and expose the
+            # paper term for new integrations.
+            packed_seq.behavior_pim_context = causal_prompt_context
+            packed_seq.causal_prompt = causal_prompt_context
         packed_sequence[packed_seq.behavior_indexes] = prefix
 
     def _encode_online_memory_prefix(

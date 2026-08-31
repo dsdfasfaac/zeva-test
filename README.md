@@ -4,6 +4,25 @@ This repository contains only the Cosmos-Behavior code needed to serve the RoboC
 
 The released policy reached **195/250 (78.0%)** closed-loop success across five RoboCasa365 Atomic tasks using 30 denoising steps.
 
+## Paper-aligned CTE and PIM extension
+
+The current `main` branch also includes the paper-facing behavior-memory API:
+
+- `CausalTransitionEncoder` (CTE), with `VisualBehaviorEncoder` retained as a
+  checkpoint-compatible alias;
+- `BriefInteractionTrace` (BIT);
+- `PersistentInteractionMemory` (PIM) and
+  `PhaseConditionedPIMRetrieval`;
+- `CausalPromptEncoder` and gated causal-prompt policy injection;
+- an online-memory policy server and fixed-seed cross-attempt evaluator;
+- a PIM-shadow formal path that keeps PIM write/retrieval lifecycle active
+  while hard-gating its action residual off for frozen-policy regression tests.
+
+The serialized Stage2/PIM parameter keys are intentionally unchanged. The
+paper-aligned names are compatibility-preserving Python interfaces, so the
+released checkpoints load without conversion. In same-process lifecycle
+off/on probes, PIM-shadow actions are bit-exact.
+
 ## What is included
 
 - Stage-1 VBE definitions used to encode causal phase/effect history;
@@ -16,7 +35,9 @@ The released policy reached **195/250 (78.0%)** closed-loop success across five 
 - the exact RoboCasa domain mapping (`robocasa-panda-omron` → model domain ID 22);
 - the exact evaluation contract and launch command.
 
-Training launchers, optimizer code, cache builders, DROID/ARX experiments, online-memory experiments, smoke tests, datasets, checkpoints, and evaluation videos are intentionally excluded.
+PIM adapter configuration, online-memory serving/evaluation code, and compact
+verification utilities are included. Large checkpoints, datasets, evaluation
+videos, and machine-specific launch files are intentionally excluded.
 
 ## Install the overlay
 

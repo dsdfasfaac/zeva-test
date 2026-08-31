@@ -147,6 +147,19 @@ class BehaviorStage2Config:
     online_memory_enabled: bool = False
     online_context_dim: int = 256
     online_prefix_tokens: int = 1
+    # Paper-aligned Persistent Interaction Memory.  PIM is injected as a
+    # gated residual into the existing global-behavior prefix, so enabling the
+    # module with gate_init=0 preserves the verified Stage-2 forward exactly.
+    pim_memory_enabled: bool = False
+    pim_persistent_length: int = 4
+    pim_context_dim: int = 256
+    pim_gate_init: float = 0.0
+    # Static inference-only kill switch. The PIM modules remain instantiated
+    # and load their trained weights, but the forward takes the original
+    # Stage-2 prefix path without executing the PIM adapter. This is stronger
+    # than an empty validity mask because it also preserves the compiled graph
+    # used by the frozen base policy.
+    pim_force_bypass: bool = False
 
 
 @attrs.define(slots=False)

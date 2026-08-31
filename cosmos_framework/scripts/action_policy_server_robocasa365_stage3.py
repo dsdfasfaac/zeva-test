@@ -667,8 +667,18 @@ class RobolabPolicyService:
                 raise ValueError(f"No memory-bank entries for {args.stage2_oracle_instruction!r}; available={available}")
             self._stage2_global = torch.stack(matching).mean(dim=0, keepdim=True).to(device=device)
         payload = torch.load(args.stage2_vbe_checkpoint, map_location="cpu", weights_only=False)
-        self._stage2_vbe = VisualBehaviorEncoder(BehaviorEncoderConfig(**payload["model_config"])).to(device)
-        self._stage2_vbe.load_state_dict(payload["model"])
+        vbe_model_config = dict(payload["model_config"])
+        vbe_state = payload["model"]
+        # Early GRU checkpoints were exported with ``use_mamba=True`` in their
+        # metadata even though their state dict contains nn.GRU parameters.
+        # Infer the serialized architecture from its keys so installing
+        # mamba_ssm later cannot silently change the model being constructed.
+        if any(key.endswith("mixer.weight_ih_l0") for key in vbe_state):
+            vbe_model_config["use_mamba"] = False
+        elif any(key.endswith("mixer.A_log") for key in vbe_state):
+            vbe_model_config["use_mamba"] = True
+        self._stage2_vbe = VisualBehaviorEncoder(BehaviorEncoderConfig(**vbe_model_config)).to(device)
+        self._stage2_vbe.load_state_dict(vbe_state)
         self._stage2_vbe.eval()
         if self._stage2_vbe.cfg.action_dim != self.cfg.action_dim:
             raise ValueError("VBE action dimension does not match policy action dimension")
@@ -847,7 +857,11 @@ class RobolabPolicyService:
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
         sample = self._build_sample(obs)
-        seed = self._next_seed()
+        requested_seed = obs.get("inference_seed")
+        seed = self._next_seed() if requested_seed is None else int(requested_seed)
+        if seed < 0 or seed >= 2**32:
+            raise ValueError("inference_seed must be in uint32 range")
+        behavior_features: dict[str, Any] | None = None
 
         with self._lock:
             with torch.inference_mode():
@@ -859,6 +873,12 @@ class RobolabPolicyService:
                     sample["behavior_phase"] = phase[0].cpu()
                     sample["behavior_effect"] = effect[0].cpu()
                     sample["behavior_effect_valid"] = effect_valid[0].cpu()
+                    behavior_features = {
+                        "global": global_feature[0].detach().float().cpu().numpy(),
+                        "phase": phase[0].detach().float().cpu().numpy(),
+                        "effect_history": effect[0].detach().float().cpu().numpy(),
+                        "effect_history_valid": effect_valid[0].detach().cpu().numpy(),
+                    }
                 data_batch = _build_data_batch_from_sample(sample)
                 log.info(f"[robolab-policy-server] prompt={data_batch['ai_caption'][0]!r} seed={seed}")
                 samples = self.model.generate_samples_from_batch(
@@ -896,6 +916,8 @@ class RobolabPolicyService:
             action_np = np.concatenate([position, quat_xyzw, action_np[:, 9:]], axis=-1)
 
         outputs: dict[str, Any] = {"action": action_np}
+        if behavior_features is not None:
+            outputs["behavior_features"] = behavior_features
         if self.cfg.decode_video:
             pred_vision_latent = samples["vision"][0]  # [C,T,H,W]
             video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]

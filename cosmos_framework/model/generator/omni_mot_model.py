@@ -775,6 +775,46 @@ class OmniMoTModel(ImaginaireModel):
         packed_sequence.behavior_phase = phase_features
         packed_sequence.behavior_effect = effect_features
         packed_sequence.behavior_effect_valid = effect_valid
+        if cfg.pim_memory_enabled:
+            pim_names = ("behavior_pim_phase", "behavior_pim_effect", "behavior_pim_valid")
+            if any(name not in data_batch for name in pim_names):
+                raise KeyError("pim_memory_enabled requires persistent phase/effect/valid tensors")
+
+            def pim_batch(name: str) -> torch.Tensor:
+                value = data_batch[name]
+                if isinstance(value, (list, tuple)):
+                    value = torch.stack(list(value))
+                if not isinstance(value, torch.Tensor):
+                    raise TypeError(f"{name} must be tensor-valued")
+                # PackingDataLoader may retain a one-item auxiliary axis.
+                if value.ndim >= 3 and value.shape[1] == 1:
+                    value = value[:, 0]
+                return value
+
+            pim_phase = pim_batch("behavior_pim_phase")
+            pim_effect = pim_batch("behavior_pim_effect")
+            pim_valid = pim_batch("behavior_pim_valid")
+            pim_phase = pim_phase.index_select(0, global_indices.to(pim_phase.device))
+            pim_effect = pim_effect.index_select(0, global_indices.to(pim_effect.device))
+            pim_valid = pim_valid.index_select(0, global_indices.to(pim_valid.device))
+            expected_phase = (global_features.shape[0], cfg.pim_persistent_length, cfg.phase_dim)
+            expected_effect = (global_features.shape[0], cfg.pim_persistent_length, cfg.effect_dim)
+            if tuple(pim_phase.shape) != expected_phase or tuple(pim_effect.shape) != expected_effect:
+                raise ValueError(
+                    f"Expected PIM phase/effect {expected_phase}/{expected_effect}, got "
+                    f"{tuple(pim_phase.shape)}/{tuple(pim_effect.shape)}"
+                )
+            if tuple(pim_valid.shape) != expected_phase[:2]:
+                raise ValueError("behavior_pim_valid has an invalid shape")
+            packed_sequence.behavior_pim_phase = pim_phase.to(
+                device=packed_sequence.text_ids.device, dtype=self.precision
+            )
+            packed_sequence.behavior_pim_effect = pim_effect.to(
+                device=packed_sequence.text_ids.device, dtype=self.precision
+            )
+            packed_sequence.behavior_pim_valid = pim_valid.to(
+                device=packed_sequence.text_ids.device, dtype=torch.bool
+            )
         if cfg.online_memory_enabled:
             if "behavior_online_context" not in data_batch:
                 raise KeyError("online_memory_enabled requires data_batch['behavior_online_context']")
