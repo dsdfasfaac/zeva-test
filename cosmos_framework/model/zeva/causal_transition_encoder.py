@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Stage-1 Visual Behavior Encoder (VBE) for DROID trajectories.
+"""Stage-1 Causal Transition Encoder (CTE) for robot trajectories.
 
 This is intentionally independent from the Cosmos action denoiser.  It learns a
-per-time-step behavior state from the same DROID multi-view observation and
+per-time-step causal interaction state from the same multi-view observation and
 8-D joint-position command format consumed by Cosmos Action.
 """
 
@@ -20,7 +20,7 @@ from torch.utils.checkpoint import checkpoint
 
 
 @dataclass
-class BehaviorEncoderConfig:
+class CausalTransitionEncoderConfig:
     action_dim: int = 8
     hidden_dim: int = 256
     retrieval_dim: int = 128
@@ -81,7 +81,7 @@ class _VisionStem(nn.Module):
         batch, steps = frames.shape[:2]
         flat = frames.flatten(0, 1)
         # A complete DROID segment can exceed 2,000 frames.  Checkpoint each
-        # visual micro-batch so the VBE remains full-trajectory causal while
+        # visual micro-batch so the CTE remains full-trajectory causal while
         # its convolutional activations do not scale with segment length.
         use_checkpoint = (
             self.training
@@ -152,14 +152,14 @@ class _CausalMixer(nn.Module):
         return x + y
 
 
-class _TriStreamBlock(nn.Module):
-    """Causal visual/action/behavior streams followed by same-step cross attention."""
+class _CausalInteractionBlock(nn.Module):
+    """Causal visual/action/interaction streams with same-step cross attention."""
 
-    def __init__(self, cfg: BehaviorEncoderConfig) -> None:
+    def __init__(self, cfg: CausalTransitionEncoderConfig) -> None:
         super().__init__()
         self.visual = _CausalMixer(cfg.hidden_dim, cfg.use_mamba)
         self.action = _CausalMixer(cfg.hidden_dim, cfg.use_mamba)
-        self.behavior = _CausalMixer(cfg.hidden_dim, cfg.use_mamba)
+        self.interaction_state = _CausalMixer(cfg.hidden_dim, cfg.use_mamba)
         self.cross = nn.MultiheadAttention(cfg.hidden_dim, cfg.num_heads, batch_first=True)
         self.cross_norm = nn.LayerNorm(cfg.hidden_dim)
         self.ffn = nn.Sequential(
@@ -169,27 +169,31 @@ class _TriStreamBlock(nn.Module):
             nn.Linear(4 * cfg.hidden_dim, cfg.hidden_dim),
         )
 
-    def forward(self, visual: Tensor, action: Tensor, behavior: Tensor, valid: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        visual, action, behavior = self.visual(visual), self.action(action), self.behavior(behavior)
+    def forward(self, visual: Tensor, action: Tensor, interaction_state: Tensor, valid: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        visual, action, interaction_state = (
+            self.visual(visual),
+            self.action(action),
+            self.interaction_state(interaction_state),
+        )
         # The three tokens for each timestep attend only within that timestep.
-        tokens = torch.stack((visual, action, behavior), dim=2)
+        tokens = torch.stack((visual, action, interaction_state), dim=2)
         batch, steps, streams, dim = tokens.shape
         tokens = tokens.reshape(batch * steps, streams, dim)
         attended, _ = self.cross(tokens, tokens, tokens, need_weights=False)
         tokens = tokens + attended
         tokens = tokens + self.ffn(tokens)
         tokens = tokens.reshape(batch, steps, streams, dim)
-        visual, action, behavior = tokens.unbind(dim=2)
+        visual, action, interaction_state = tokens.unbind(dim=2)
         mask = valid.unsqueeze(-1).to(visual.dtype)
-        return visual * mask, action * mask, behavior * mask
+        return visual * mask, action * mask, interaction_state * mask
 
 
 class CausalTransitionEncoder(nn.Module):
-    """Causal VBE with EMA visual target encoder and two memory-bank projections."""
+    """Causal transition encoder with phase and causal-effect projections."""
 
-    def __init__(self, cfg: BehaviorEncoderConfig | None = None) -> None:
+    def __init__(self, cfg: CausalTransitionEncoderConfig | None = None) -> None:
         super().__init__()
-        self.cfg = cfg or BehaviorEncoderConfig()
+        self.cfg = cfg or CausalTransitionEncoderConfig()
         self.visual_encoder = _VisionStem(
             self.cfg.image_channels,
             self.cfg.hidden_dim,
@@ -198,16 +202,16 @@ class CausalTransitionEncoder(nn.Module):
             self.cfg.vision_checkpoint_threshold,
         )
         self.target_visual_encoder = deepcopy(self.visual_encoder).requires_grad_(False)
-        # The behavior/action stream is intentionally right shifted.  At state
+        # The interaction/action stream is intentionally right shifted. At state
         # v_b it sees only the completed transition u_(b-1), never u_b.  The
         # latter is supplied exclusively to the auxiliary effect heads.
         transition_dim = self.cfg.transition_steps * self.cfg.action_dim
         self.action_encoder = nn.Sequential(nn.LayerNorm(transition_dim), nn.Linear(transition_dim, self.cfg.hidden_dim))
         self.bos_action = nn.Parameter(torch.zeros(1, 1, self.cfg.hidden_dim))
         nn.init.normal_(self.bos_action, std=0.02)
-        self.behavior_token = nn.Parameter(torch.zeros(1, 1, self.cfg.hidden_dim))
-        nn.init.normal_(self.behavior_token, std=0.02)
-        self.blocks = nn.ModuleList([_TriStreamBlock(self.cfg) for _ in range(self.cfg.num_layers)])
+        self.interaction_state_token = nn.Parameter(torch.zeros(1, 1, self.cfg.hidden_dim))
+        nn.init.normal_(self.interaction_state_token, std=0.02)
+        self.blocks = nn.ModuleList([_CausalInteractionBlock(self.cfg) for _ in range(self.cfg.num_layers)])
         self.final_norm = nn.LayerNorm(self.cfg.hidden_dim)
         self.retrieval_head = nn.Linear(self.cfg.hidden_dim, self.cfg.retrieval_dim)
         self.phase_head = nn.Linear(self.cfg.hidden_dim, self.cfg.phase_dim)
@@ -270,7 +274,7 @@ class CausalTransitionEncoder(nn.Module):
             or transition_actions.shape[1] != frames.shape[1] - 1
             or transition_actions.shape[2:] != (self.cfg.transition_steps, self.cfg.action_dim)
         ):
-            raise ValueError("Frame/transition time axes or action shape do not match VBE config.")
+            raise ValueError("Frame/transition time axes or action shape do not match CTE config.")
         if valid_mask is None:
             valid_mask = torch.ones(frames.shape[:2], dtype=torch.bool, device=frames.device)
         if transition_valid is None:
@@ -283,10 +287,10 @@ class CausalTransitionEncoder(nn.Module):
         action = self.bos_action.expand(frames.shape[0], frames.shape[1], -1).clone()
         action[:, 1:] = transition_embed
         action[:, 1:] *= transition_valid.all(dim=-1, keepdim=True).to(action.dtype)
-        behavior = self.behavior_token.expand_as(visual)
+        interaction_state = self.interaction_state_token.expand_as(visual)
         for block in self.blocks:
-            visual, action, behavior = block(visual, action, behavior, valid_mask)
-        z = self.final_norm(behavior) * valid_mask.unsqueeze(-1)
+            visual, action, interaction_state = block(visual, action, interaction_state, valid_mask)
+        z = self.final_norm(interaction_state) * valid_mask.unsqueeze(-1)
         with torch.no_grad():
             target_visual = self.target_visual_encoder(frames)
         transition_complete = valid_mask[:, :-1] & valid_mask[:, 1:] & transition_valid.all(dim=-1)
@@ -346,7 +350,7 @@ class CausalTransitionEncoder(nn.Module):
             effect_outcome_post = self.effect_outcome_head(effect_post_raw)
             effect_action = self.effect_action_head(effect_pre_raw)
         return {
-            "behavior": z,
+            "causal_interaction_state": z,
             "retrieval": F.normalize(self.retrieval_head(z), dim=-1),
             "phase": F.normalize(self.phase_head(z), dim=-1),
             "next_action": self.action_head(z[:, :-1]).view(
@@ -355,7 +359,7 @@ class CausalTransitionEncoder(nn.Module):
             "next_vision": self.visual_head(z),
             # Frozen target-visual representation used as the online-memory
             # retrieval key.  It is causal at the current observed frame and
-            # shares the Stage-1 VAE/VBE contract.
+            # shares the Stage-1 VAE/CTE contract.
             "visual_key": F.normalize(target_visual[..., : self.cfg.phase_dim], dim=-1),
             "effect_pre": effect_pre,
             "effect_post": effect_post,
@@ -370,8 +374,3 @@ class CausalTransitionEncoder(nn.Module):
             "target_visual": target_visual,
             "transition_complete": transition_complete,
         }
-
-
-# Backward-compatible engineering name.  Class names do not participate in
-# state-dict keys, so old checkpoints retain the identical parameter schema.
-VisualBehaviorEncoder = CausalTransitionEncoder

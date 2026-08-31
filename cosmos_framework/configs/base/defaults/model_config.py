@@ -115,11 +115,11 @@ class RectifiedFlowTrainingConfig:
 
 
 @attrs.define(slots=False)
-class BehaviorStage2Config:
-    """Configuration for oracle Stage-2 behavior conditioning.
+class ZevaPolicyConfig:
+    """Configuration for Zeva causal-context policy conditioning.
 
     Data paths intentionally live in the dataset recipe. This model config only
-    describes the learned PBD/adapter and is disabled by default, preserving
+    describes the learned policy-injection prior and is disabled by default, preserving
     every existing Cosmos recipe.
     """
 
@@ -142,8 +142,8 @@ class BehaviorStage2Config:
     # than policy commands. DROID/RoboTwin use one; RoboCasa365 uses zero
     # because its 16-D proprio state is not isomorphic to its 12-D action.
     leading_condition_steps: int = 1
-    # Optional same-task-session online transition context.  The context is
-    # already encoded by OnlineMemoryEncoder before entering the model.
+    # Optional same-task-session transition context. The context is already
+    # encoded by TransitionMemoryEncoder before entering the model.
     online_memory_enabled: bool = False
     online_context_dim: int = 256
     online_prefix_tokens: int = 1
@@ -160,6 +160,10 @@ class BehaviorStage2Config:
     # than an empty validity mask because it also preserves the compiled graph
     # used by the frozen base policy.
     pim_force_bypass: bool = False
+
+
+# Serialized releases may still reference this fully qualified type name.
+BehaviorStage2Config = ZevaPolicyConfig
 
 
 @attrs.define(slots=False)
@@ -259,7 +263,9 @@ class OmniMoTModelConfig:
     # Rectified flow configs
     rectified_flow_training_config: RectifiedFlowTrainingConfig = RectifiedFlowTrainingConfig()
     rectified_flow_inference_config: RectifiedFlowInferenceConfig = RectifiedFlowInferenceConfig()
-    behavior_stage2: BehaviorStage2Config = BehaviorStage2Config()
+    # The field name is serialized in released configs; the type and all new
+    # public APIs use the Zeva paper terminology.
+    behavior_stage2: ZevaPolicyConfig = ZevaPolicyConfig()
     proprio_condition: ProprioConditionConfig = ProprioConditionConfig()
 
     # Optional fixed-step sampler for distilled models (None for base models).

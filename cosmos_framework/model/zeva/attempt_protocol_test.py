@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cosmos_framework.model.behavior.phase0_contract import (
+from cosmos_framework.model.zeva.attempt_protocol import (
     EFFECT_ACTION_HORIZON,
     EFFECT_VBE_TRANSITIONS,
     EXECUTED_ACTION_HORIZON,

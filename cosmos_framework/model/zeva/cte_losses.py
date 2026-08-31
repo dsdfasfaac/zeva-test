@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Self-supervised and weakly supervised losses for Stage-1 VBE."""
+"""Learning objectives for the Causal Transition Encoder (CTE)."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from torch.nn import functional as F
 
 
 @dataclass
-class BehaviorLossConfig:
+class CTELossConfig:
     action_weight: float = 1.0
     vision_weight: float = 1.0
-    global_weight: float = 0.2
-    local_weight: float = 0.1
+    task_weight: float = 0.2
+    phase_weight: float = 0.1
     # Effect-v3: observed outcomes are contrastive and explicitly protected
     # against rank collapse. Action reconstruction remains a weak auxiliary.
     effect_weight: float = 0.25
@@ -35,7 +35,9 @@ def _masked_mean(x: Tensor, mask: Tensor) -> Tensor:
     return (x * weight).sum(dim=1) / weight.sum(dim=1).clamp_min(1.0)
 
 
-def _global_supcon(retrieval: Tensor, valid: Tensor, semantic_ids: Tensor, temperature: float) -> Tensor:
+def _task_identity_clustering_loss(
+    retrieval: Tensor, valid: Tensor, semantic_ids: Tensor, temperature: float
+) -> Tensor:
     """Multi-positive supervised contrastive loss; samples without a positive are ignored."""
     z = F.normalize(_masked_mean(retrieval, valid), dim=-1)
     logits = z @ z.T / temperature
@@ -49,15 +51,16 @@ def _global_supcon(retrieval: Tensor, valid: Tensor, semantic_ids: Tensor, tempe
     return -(log_prob.masked_fill(~positives, 0.0).sum(dim=1) / positives.sum(dim=1).clamp_min(1))[usable].mean()
 
 
-def _local_temporal_nce(phase: Tensor, valid: Tensor, temperature: float) -> Tensor:
-    """Keep each valid trajectory phase distinguishable from other phases in that trajectory."""
+def _phase_progression_loss(phase: Tensor, valid: Tensor, margin: float = 0.01) -> Tensor:
+    """Encourage consecutive phase tokens to advance along one trajectory direction."""
     losses: list[Tensor] = []
     for sequence, mask in zip(phase, valid, strict=True):
         z = sequence[mask]
-        if z.shape[0] < 2:
+        if z.shape[0] < 3:
             continue
-        logits = F.normalize(z, dim=-1) @ F.normalize(z, dim=-1).T / temperature
-        losses.append(F.cross_entropy(logits, torch.arange(z.shape[0], device=z.device)))
+        direction = F.normalize(z[-1] - z[0], dim=-1)
+        increments = (z[1:] - z[:-1]) @ direction
+        losses.append(F.relu(margin - increments).mean())
     return torch.stack(losses).mean() if losses else phase.new_zeros(())
 
 
@@ -104,15 +107,15 @@ def _vicreg(code: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
     return variance, covariance_loss
 
 
-def behavior_vbe_loss(
+def causal_transition_encoder_loss(
     outputs: dict[str, Tensor],
     transition_actions: Tensor,
     valid_mask: Tensor,
     semantic_ids: Tensor,
-    cfg: BehaviorLossConfig | None = None,
+    cfg: CTELossConfig | None = None,
 ) -> dict[str, Tensor]:
-    """Stage-1 objective with low-rate visual effect contrast and VICReg."""
-    cfg = cfg or BehaviorLossConfig()
+    """CTE objective: causal effect, task identity, and phase progression."""
+    cfg = cfg or CTELossConfig()
     transition_complete = outputs["transition_complete"]
     if transition_complete.shape != transition_actions.shape[:2]:
         raise ValueError("Effect outputs and transition-action cache are not temporally aligned.")
@@ -125,8 +128,8 @@ def behavior_vbe_loss(
         outputs["next_vision"][:, :-1], target_vision[:, 1:], reduction="none"
     ).mean(dim=-1)
     vision_loss = (vision_error * transition_complete).sum() / transition_complete.sum().clamp_min(1)
-    global_loss = _global_supcon(outputs["retrieval"], valid_mask, semantic_ids, cfg.temperature)
-    local_loss = _local_temporal_nce(outputs["phase"], valid_mask, cfg.temperature)
+    task_loss = _task_identity_clustering_loss(outputs["retrieval"], valid_mask, semantic_ids, cfg.temperature)
+    phase_loss = _phase_progression_loss(outputs["phase"], valid_mask)
     effect_mask = outputs["effect_complete"]
     effect_target = outputs["effect_delta_target"]
     effect_nce_pre = _effect_nce(outputs["effect_outcome_pre"], effect_target, effect_mask, cfg.effect_temperature)
@@ -154,17 +157,17 @@ def behavior_vbe_loss(
     total = (
         cfg.action_weight * action_loss
         + cfg.vision_weight * vision_loss
-        + cfg.global_weight * global_loss
-        + cfg.local_weight * local_loss
+        + cfg.task_weight * task_loss
+        + cfg.phase_weight * phase_loss
         + cfg.effect_weight * effect_loss
     )
     return {
         "total": total,
         "action": action_loss,
         "vision": vision_loss,
-        "global": global_loss,
-        "local": local_loss,
-        "effect": effect_loss,
+        "loss_task": task_loss,
+        "loss_phase": phase_loss,
+        "loss_effect": effect_loss,
         "effect_contrastive": effect_contrastive_loss,
         "effect_visual": effect_visual_loss,
         "effect_action": effect_action_loss,

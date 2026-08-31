@@ -11,13 +11,13 @@ from transformers.modeling_utils import PreTrainedModel
 
 from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
 from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
-from cosmos_framework.model.behavior import (
-    ActionPriorConfig,
-    ActionPriorNetwork,
-    BehaviorActionAdapter,
+from cosmos_framework.model.zeva import (
     BriefInteractionTrace,
     CausalPromptConfig,
     CausalPromptEncoder,
+    CausalPromptPolicyAdapter,
+    PolicyInjectionConfig,
+    PolicyInjectionPrior,
     inject_causal_prompt,
 )
 from cosmos_framework.model.generator.mot.attention import SplitInfo, build_packed_sequence
@@ -183,8 +183,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         behavior_cfg = config.behavior_stage2_config
         if behavior_cfg is not None and behavior_cfg.get("enabled", False):
             if not config.action_gen:
-                raise ValueError("Stage-2 behavior conditioning requires action_gen=True")
-            prior_cfg = ActionPriorConfig(
+                raise ValueError("Zeva policy injection requires action_gen=True")
+            prior_cfg = PolicyInjectionConfig(
                 global_dim=int(behavior_cfg["global_dim"]),
                 phase_dim=int(behavior_cfg["phase_dim"]),
                 effect_dim=int(behavior_cfg.get("effect_dim", 128)),
@@ -195,12 +195,14 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 hidden_dim=int(behavior_cfg["hidden_dim"]),
                 num_heads=int(behavior_cfg["num_heads"]),
             )
-            self.behavior_pbd: ActionPriorNetwork | None = ActionPriorNetwork(prior_cfg)
-            self.behavior_adapter: BehaviorActionAdapter | None = BehaviorActionAdapter(
+            # These registered attribute names are retained solely because they
+            # are part of the released DCP state-dict schema.
+            self.behavior_pbd: PolicyInjectionPrior | None = PolicyInjectionPrior(prior_cfg)
+            self.behavior_adapter: CausalPromptPolicyAdapter | None = CausalPromptPolicyAdapter(
                 action_dim=prior_cfg.action_dim, hidden_dim=self.hidden_size
             )
-            # BehaviorVLA's second conditioning path: the episode-level global
-            # behavior is a learned understanding-prefix token visible to every
+            # Zeva's second conditioning path: the episode-level task context
+            # is a learned understanding-prefix token visible to every
             # action query through Cosmos two-way attention.
             self.behavior_global_projector: nn.Linear | None = nn.Linear(
                 prior_cfg.global_dim, self.hidden_size, bias=True
@@ -1006,10 +1008,10 @@ class Cosmos3VFMNetwork(PreTrainedModel):
 
         if self.behavior_pbd is not None and self.behavior_adapter is not None:
             if not all(hasattr(packed_seq, name) for name in ("behavior_global", "behavior_phase", "behavior_effect", "behavior_effect_valid")):
-                raise ValueError("Stage-2 behavior model requires global, phase and causal effect-history features")
+                raise ValueError("Zeva requires task context, phase and BIT features")
             action_lengths = {int(tokens.shape[0]) for tokens in action.tokens}
             if len(action_lengths) != 1:
-                raise ValueError("Stage-2 PBD currently requires a fixed action horizon within each batch")
+                raise ValueError("Zeva policy injection requires a fixed action horizon within each batch")
             prior_mean, prior_std = self.behavior_pbd(
                 packed_seq.behavior_global,
                 packed_seq.behavior_phase,

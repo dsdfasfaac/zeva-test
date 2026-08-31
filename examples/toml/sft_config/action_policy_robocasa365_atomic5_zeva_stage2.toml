@@ -1,5 +1,5 @@
 # Effect-v3 Stage 2 — RoboCasa Atomic-5.  Requires the baseline environment
-# plus BEHAVIOR_MEMORY_BANK and BEHAVIOR_PHASE_CACHE from the delivered VBE.
+# plus ZEVA_TASK_CONTEXT_BANK and ZEVA_CTE_FEATURE_CACHE from the delivered CTE.
 
 [job]
 task = "vfm"

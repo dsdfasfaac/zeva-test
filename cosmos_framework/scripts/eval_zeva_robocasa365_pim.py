@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Closed-loop RoboCasa365 evaluation client for the Cosmos3 atomic5 policy."""
+"""Closed-loop RoboCasa365 evaluation client for the Zeva Atomic-5 policy with PIM."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import robocasa.wrappers.gym_wrapper  # noqa: F401
 from robocasa.utils.env_utils import convert_action
 
 try:
-    from cosmos_framework.model.behavior.phase0_contract import (
+    from cosmos_framework.model.zeva.attempt_protocol import (
         EXECUTED_ACTION_HORIZON,
         MAX_CONTROLS_PER_ATTEMPT,
         PREDICTED_ACTION_HORIZON,
@@ -35,7 +35,7 @@ try:
 except ModuleNotFoundError:
     # Allow the evaluator and contract file to be copied together to a
     # simulator-only machine that does not contain the full Cosmos source.
-    from phase0_contract import (  # type: ignore[no-redef]
+    from attempt_protocol import (  # type: ignore[no-redef]
         EXECUTED_ACTION_HORIZON,
         MAX_CONTROLS_PER_ATTEMPT,
         PREDICTED_ACTION_HORIZON,
@@ -47,7 +47,7 @@ except ModuleNotFoundError:
     )
 
 try:
-    from cosmos_framework.model.behavior.phase1_attempt_schema import (
+    from cosmos_framework.model.zeva.phase1_attempt_schema import (
         ATTEMPT_RECORD_VERSION,
         CHUNK_RECORD_VERSION,
         sha256_file,
@@ -465,7 +465,7 @@ def main() -> None:
         obs = reset[0] if isinstance(reset, tuple) else reset
         frames: list[np.ndarray] = []
         action_queue: deque[np.ndarray] = deque()
-        # Stage-2 VBE is defined at Wan's four-control cadence.  Retain only
+        # The CTE is defined at Wan's four-control cadence. Retain only
         # observations at raw offsets 0,4,8,... and the *executed* arm7
         # controls between them.  The policy server derives a first effect
         # only after four such transitions (16 executed controls).

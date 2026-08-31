@@ -189,7 +189,7 @@ def main() -> None:
         obs = reset[0] if isinstance(reset, tuple) else reset
         frames: list[np.ndarray] = []
         action_queue: deque[np.ndarray] = deque()
-        # Stage-2 VBE is defined at Wan's four-control cadence.  Retain only
+        # The CTE is defined at Wan's four-control cadence. Retain only
         # observations at raw offsets 0,4,8,... and the *executed* arm7
         # controls between them.  The policy server derives a first effect
         # only after four such transitions (16 executed controls).

@@ -1,4 +1,4 @@
-"""Runtime glue for causal ARX task-session online memory."""
+"""Runtime glue for the experimental task-session transition memory."""
 
 from __future__ import annotations
 
@@ -6,29 +6,29 @@ from dataclasses import dataclass
 
 import torch
 
-from .online_memory import OnlineMemoryEncoder, OnlineMemorySchema, OnlineTransition, TaskSessionMemory
+from .transition_memory import TransitionMemory, TransitionMemoryEncoder, TransitionMemorySchema, TransitionRecord
 
 
 @dataclass
-class OnlineMemoryReadout:
+class TransitionMemoryReadout:
     context: torch.Tensor
     scores: torch.Tensor
     num_entries: int
 
 
-class OnlineMemoryController:
+class TransitionMemoryController:
     """Owns task reset, causal writes, and context reads for one policy server."""
 
     def __init__(
         self,
-        schema: OnlineMemorySchema | None = None,
+        schema: TransitionMemorySchema | None = None,
         *,
-        encoder: OnlineMemoryEncoder | None = None,
+        encoder: TransitionMemoryEncoder | None = None,
         enabled: bool = False,
     ) -> None:
-        self.schema = schema or OnlineMemorySchema()
-        self.memory = TaskSessionMemory(self.schema)
-        self.encoder = encoder or OnlineMemoryEncoder(self.schema)
+        self.schema = schema or TransitionMemorySchema()
+        self.memory = TransitionMemory(self.schema)
+        self.encoder = encoder or TransitionMemoryEncoder(self.schema)
         self.enabled = bool(enabled)
         self._replan_open = False
 
@@ -50,7 +50,7 @@ class OnlineMemoryController:
         return was_open
 
     @torch.inference_mode()
-    def read(self, phase: torch.Tensor, visual_key: torch.Tensor) -> OnlineMemoryReadout:
+    def read(self, phase: torch.Tensor, visual_key: torch.Tensor) -> TransitionMemoryReadout:
         """Read only transitions written before this replan."""
         if not self._replan_open:
             raise RuntimeError("begin_replan() must precede an online-memory read")
@@ -59,7 +59,7 @@ class OnlineMemoryController:
             context = self.encoder(phase, visual_key, entries)
         else:
             context = phase.new_zeros((1, self.encoder.hidden_dim))
-        return OnlineMemoryReadout(context=context, scores=scores, num_entries=len(entries))
+        return TransitionMemoryReadout(context=context, scores=scores, num_entries=len(entries))
 
     def complete_replan(
         self,
@@ -81,10 +81,10 @@ class OnlineMemoryController:
         if not completed:
             return False
         if executed_action.shape != (self.schema.action_horizon, self.schema.action_dim):
-            raise ValueError("only a completed 16-step action window may enter online memory")
+            raise ValueError("only a completed 16-step action window may enter transition memory")
         assert self.memory.task_cluster is not None
         self.memory.append(
-            OnlineTransition(
+            TransitionRecord(
                 task_cluster=self.memory.task_cluster,
                 phase=phase,
                 visual_key=visual_key,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""WebSocket inference server for the fixed-base RoboCasa365 Cosmos3 policy.
+"""WebSocket inference server for the fixed-base RoboCasa365 Zeva policy with PIM.
 
 The server uses OpenPI's WebsocketPolicyServer and speaks its msgpack+NumPy protocol:
 
@@ -49,21 +49,24 @@ from cosmos_framework.data.generator.action.pose_utils import (
 )
 from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
 from cosmos_framework.data.generator.joint_dataloader import IterativeJointDataLoader
-from cosmos_framework.model.behavior import (
-    BehaviorEncoderConfig,
-    BehaviorRetrievalConfig,
-    Stage3RetrievalHead,
-    OnlineMemoryEncoder,
-    OnlineMemorySchema,
-    OnlineTransition,
+from cosmos_framework.model.zeva import (
+    CausalTransitionEncoder,
+    CausalTransitionEncoderConfig,
+    StaticTaskContextRetrievalConfig,
+    StaticTaskContextRetrievalHead,
     PersistentInteractionMemory,
     PersistentInteractionMemoryConfig,
-    VisualBehaviorEncoder,
-    retrieve_behavior_values,
+    remap_legacy_cte_state_dict,
+    retrieve_static_task_context,
 )
-from cosmos_framework.model.behavior.robocasa_online_memory import make_robocasa_atomic5_schema
-from cosmos_framework.model.behavior.online_memory_runtime import OnlineMemoryController
-from cosmos_framework.model.behavior.phase0_contract import (
+from cosmos_framework.model.zeva.experimental.robocasa_transition_memory import make_robocasa_atomic5_schema
+from cosmos_framework.model.zeva.experimental.transition_memory import (
+    TransitionMemoryEncoder,
+    TransitionMemorySchema,
+    TransitionRecord,
+)
+from cosmos_framework.model.zeva.experimental.transition_memory_runtime import TransitionMemoryController
+from cosmos_framework.model.zeva.attempt_protocol import (
     EXECUTED_ACTION_HORIZON,
     PREDICTED_ACTION_HORIZON,
     AttemptSessionKey,
@@ -80,7 +83,7 @@ from cosmos_framework.scripts.action_policy_server_utils import (
     get_local_ip,
     maybe_init_distributed,
 )
-from cosmos_framework.scripts.extract_behavior_cosmos_readout_robocasa import extract_batch, format_action_prompt
+from cosmos_framework.scripts.action_policy_server_robocasa365_zeva import extract_batch, format_action_prompt
 from cosmos_framework.utils import log
 from cosmos_framework.utils.checkpoint_db import CheckpointDirHf
 from cosmos_framework.utils.lazy_config import instantiate
@@ -381,20 +384,20 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Serve prompts as structured JSON (matching training ``format_prompt_as_json``)."""
     proprio_dim: int = 9
     """Independent fixed-base proprio input: relative EEF pose (7) plus gripper qpos (2)."""
-    stage2_memory_bank: Path | None = None
+    task_context_bank: Path | None = None
     """Frozen effect-v3 memory bank; enables the evaluation-only task-cluster oracle global token."""
-    stage2_vbe_checkpoint: Path | None = None
-    """Frozen effect-v3 VBE checkpoint used only to derive causal phase/effect features."""
+    cte_checkpoint: Path | None = None
+    """Frozen CTE checkpoint used to derive phase and causal-effect features."""
     stage2_oracle_instruction: str | None = None
     """Exact Atomic-5 task key used to average matching memory-bank behavior values."""
-    stage3_retrieval_checkpoint: Path | None = None
-    """Learned Stage-3 readout-to-memory retrieval head. Mutually exclusive with the task-ID oracle."""
-    stage3_retrieval_top_k: int = 5
+    static_task_context_checkpoint: Path | None = None
+    """Static task-context retrieval head, mutually exclusive with the task-ID oracle."""
+    static_task_context_top_k: int = 5
     """Number of frozen memory-bank entries used to form the learned global behavior token."""
     stage2_effect_mode: Literal["normal", "zero", "shuffled"] = "normal"
     """Evaluation ablation for completed causal effects; never use outside controlled diagnostics."""
-    disable_behavior_residual: bool = False
-    """Diagnostic only: zero behavior adapter and global projector while preserving required input fields."""
+    disable_policy_injection: bool = False
+    """Diagnostic only: zero the policy adapter and task-context projector."""
     online_memory_encoder_checkpoint: Path | None = None
     """Standalone history-only RoboCasa Atomic-5 online-memory encoder checkpoint."""
     online_memory_enabled: bool = False
@@ -526,12 +529,12 @@ class RobolabPolicyService:
         self._online_session_id: str | None = None
         self._online_session_key: AttemptSessionKey | None = None
         self._online_attempt_id: int | None = None
-        self._online_wrong_task_entries: list[OnlineTransition] = []
+        self._online_wrong_task_entries: list[TransitionRecord] = []
         self._online_support_task: str | None = None
         if not self._online_enabled:
             return
         if not self._stage2_oracle_enabled:
-            raise ValueError("Online memory requires Stage-2 VBE/bank features")
+            raise ValueError("Experimental transition memory requires CTE/task-context features")
         if args.online_memory_encoder_checkpoint is None:
             raise ValueError("--online-memory-encoder-checkpoint is required for online memory")
         if not args.online_memory_encoder_checkpoint.is_file():
@@ -540,7 +543,7 @@ class RobolabPolicyService:
         if payload.get("format") != "robocasa_atomic5_online_memory_encoder_v1":
             raise ValueError("Unsupported RoboCasa online-memory encoder format")
         raw_schema = dict(payload.get("schema", {}))
-        schema = OnlineMemorySchema(**{k: raw_schema[k] for k in OnlineMemorySchema.__dataclass_fields__ if k in raw_schema})
+        schema = TransitionMemorySchema(**{k: raw_schema[k] for k in TransitionMemorySchema.__dataclass_fields__ if k in raw_schema})
         expected = make_robocasa_atomic5_schema(
             vbe_hash=schema.vbe_hash,
             vae_temporal_hash=schema.vae_temporal_hash,
@@ -555,10 +558,10 @@ class RobolabPolicyService:
             or schema.task_contract != expected.task_contract
         ):
             raise ValueError("Online-memory encoder has the wrong RoboCasa action/temporal contract")
-        encoder = OnlineMemoryEncoder(schema=schema, hidden_dim=256)
+        encoder = TransitionMemoryEncoder(schema=schema, hidden_dim=256)
         encoder.load_state_dict(payload["model"], strict=True)
         device = next(self.model.parameters()).device
-        self._online_controller = OnlineMemoryController(
+        self._online_controller = TransitionMemoryController(
             schema=schema, encoder=encoder.to(device), enabled=bool(args.online_memory_enabled)
         )
         self._online_controller.encoder.eval()
@@ -577,7 +580,7 @@ class RobolabPolicyService:
                 if raw.get("task_cluster") != args.online_memory_support_task:
                     continue
                 self._online_wrong_task_entries.append(
-                    OnlineTransition(
+                    TransitionRecord(
                         task_cluster=str(raw["task_cluster"]),
                         phase=raw["phase"].float().cpu(),
                         visual_key=raw["visual_key"].float().cpu(),
@@ -626,7 +629,7 @@ class RobolabPolicyService:
         if self._online_enabled:
             raise ValueError("PIM and legacy online-memory conditioning are mutually exclusive")
         if not self._stage2_oracle_enabled:
-            raise ValueError("PIM requires Stage-2 VBE/bank features")
+            raise ValueError("PIM requires CTE/task-context features")
         if self._pim_conditioning and not self._model_has_pim:
             raise ValueError("--pim-enabled requires a checkpoint trained with pim_memory_enabled=true")
         model_pim = getattr(self.model.net, "behavior_pim_encoder", None)
@@ -749,57 +752,58 @@ class RobolabPolicyService:
     def _init_stage2_oracle(self, args: RobolabServerArgs) -> None:
         """Load frozen Stage-1 artifacts for a causal, evaluation-only oracle path.
 
-        This deliberately does not implement learned Stage-3 retrieval.  The
+        This helper only validates the task-ID oracle. Static task-context
+        retrieval is handled by the dedicated retrieval head. The
         supplied task key selects the mean global value from the matching
         training-task cluster, while phase/effect are recomputed only from
         observations and actions the evaluation client has already executed.
         """
         artifacts = (
-            args.stage2_memory_bank,
-            args.stage2_vbe_checkpoint,
+            args.task_context_bank,
+            args.cte_checkpoint,
             args.stage2_oracle_instruction,
-            args.stage3_retrieval_checkpoint,
+            args.static_task_context_checkpoint,
         )
         if not any(item is not None for item in artifacts):
             self._stage2_oracle_enabled = False
             return
-        if args.stage2_memory_bank is None or args.stage2_vbe_checkpoint is None:
+        if args.task_context_bank is None or args.cte_checkpoint is None:
             raise ValueError(
-                "Behavior serving requires --stage2-memory-bank and --stage2-vbe-checkpoint"
+                "Zeva serving requires --task-context-bank and --cte-checkpoint"
             )
-        if (args.stage2_oracle_instruction is None) == (args.stage3_retrieval_checkpoint is None):
+        if (args.stage2_oracle_instruction is None) == (args.static_task_context_checkpoint is None):
             raise ValueError(
-                "Provide exactly one of --stage2-oracle-instruction or --stage3-retrieval-checkpoint"
+                "Provide exactly one of --stage2-oracle-instruction or --static-task-context-checkpoint"
             )
-        if args.stage3_retrieval_top_k < 1:
-            raise ValueError("--stage3-retrieval-top-k must be positive")
+        if args.static_task_context_top_k < 1:
+            raise ValueError("--static-task-context-top-k must be positive")
         self._stage2_effect_mode = args.stage2_effect_mode
-        assert args.stage2_memory_bank is not None
-        assert args.stage2_vbe_checkpoint is not None
-        if not args.stage2_memory_bank.is_file() or not args.stage2_vbe_checkpoint.is_file():
+        assert args.task_context_bank is not None
+        assert args.cte_checkpoint is not None
+        if not args.task_context_bank.is_file() or not args.cte_checkpoint.is_file():
             raise FileNotFoundError("Stage-2 oracle artifacts must be regular files")
         if getattr(self.model.net, "behavior_pbd", None) is None:
-            raise ValueError("Loaded policy has no behavior_stage2 PBD; refusing oracle-effect evaluation")
-        if args.disable_behavior_residual:
+            raise ValueError("Loaded policy has no Zeva policy-injection prior; refusing oracle-effect evaluation")
+        if args.disable_policy_injection:
             for name in ("behavior_adapter", "behavior_global_projector"):
                 module = getattr(self.model.net, name, None)
                 if module is None:
                     raise ValueError(f"Loaded policy has no {name} for zero-residual ablation")
                 for parameter in module.parameters():
                     parameter.data.zero_()
-            log.info("[robolab-policy-server] zeroed behavior adapter and global projector for ablation")
+            log.info("[robolab-policy-server] zeroed Zeva policy injection for ablation")
 
         device = next(self.model.parameters()).device
-        bank = torch.load(args.stage2_memory_bank, map_location="cpu", weights_only=True)
+        bank = torch.load(args.task_context_bank, map_location="cpu", weights_only=True)
         entries = bank.get("entries")
         if not isinstance(entries, list) or not entries:
-            raise ValueError(f"Memory bank has no entries: {args.stage2_memory_bank}")
-        self._stage3_retrieval_enabled = args.stage3_retrieval_checkpoint is not None
-        if self._stage3_retrieval_enabled:
-            assert args.stage3_retrieval_checkpoint is not None
-            if not args.stage3_retrieval_checkpoint.is_file():
-                raise FileNotFoundError(f"Stage-3 retrieval checkpoint not found: {args.stage3_retrieval_checkpoint}")
-            retrieval_payload = torch.load(args.stage3_retrieval_checkpoint, map_location="cpu", weights_only=True)
+            raise ValueError(f"Task-context bank has no entries: {args.task_context_bank}")
+        self._static_task_context_enabled = args.static_task_context_checkpoint is not None
+        if self._static_task_context_enabled:
+            assert args.static_task_context_checkpoint is not None
+            if not args.static_task_context_checkpoint.is_file():
+                raise FileNotFoundError(f"Static task-context checkpoint not found: {args.static_task_context_checkpoint}")
+            retrieval_payload = torch.load(args.static_task_context_checkpoint, map_location="cpu", weights_only=True)
             # Keep existing released checkpoints loadable after the public
             # rename while all newly written metadata uses the zeva marker.
             supported_formats = {
@@ -807,17 +811,17 @@ class RobolabPolicyService:
                 "cosmos_" + "behavior_retrieval_head_v1",
             }
             if retrieval_payload.get("format") not in supported_formats:
-                raise ValueError("Unsupported Stage-3 retrieval checkpoint")
-            self._stage3_retrieval = Stage3RetrievalHead(
-                BehaviorRetrievalConfig(**retrieval_payload["config"])
+                raise ValueError("Unsupported static task-context checkpoint")
+            self._static_task_context_head = StaticTaskContextRetrievalHead(
+                StaticTaskContextRetrievalConfig(**retrieval_payload["config"])
             ).to(device)
-            self._stage3_retrieval.load_state_dict(retrieval_payload["model"])
-            self._stage3_retrieval.eval()
-            self._stage3_memory_keys = torch.stack([entry["retrieval_key"].float() for entry in entries]).to(device)
-            self._stage3_memory_values = torch.stack([entry["behavior_value"].float() for entry in entries]).to(device)
-            if self._stage3_memory_keys.shape[-1] != self._stage3_retrieval.config.output_dim:
-                raise ValueError("Stage-3 retrieval output dimension does not match memory-bank retrieval keys")
-            self._stage3_retrieval_top_k = min(args.stage3_retrieval_top_k, len(entries))
+            self._static_task_context_head.load_state_dict(retrieval_payload["model"])
+            self._static_task_context_head.eval()
+            self._static_task_context_keys = torch.stack([entry["retrieval_key"].float() for entry in entries]).to(device)
+            self._static_task_context_values = torch.stack([entry["behavior_value"].float() for entry in entries]).to(device)
+            if self._static_task_context_keys.shape[-1] != self._static_task_context_head.config.output_dim:
+                raise ValueError("Static task-context output dimension does not match bank retrieval keys")
+            self._static_task_context_top_k = min(args.static_task_context_top_k, len(entries))
         else:
             assert args.stage2_oracle_instruction is not None
             matching = [
@@ -829,23 +833,23 @@ class RobolabPolicyService:
                 available = sorted({str(entry.get("instruction", "")) for entry in entries})
                 raise ValueError(f"No memory-bank entries for {args.stage2_oracle_instruction!r}; available={available}")
             self._stage2_global = torch.stack(matching).mean(dim=0, keepdim=True).to(device=device)
-        payload = torch.load(args.stage2_vbe_checkpoint, map_location="cpu", weights_only=False)
-        vbe_model_config = dict(payload["model_config"])
-        vbe_state = payload["model"]
-        if any(key.endswith("mixer.weight_ih_l0") for key in vbe_state):
-            vbe_model_config["use_mamba"] = False
-        elif any(key.endswith("mixer.A_log") for key in vbe_state):
-            vbe_model_config["use_mamba"] = True
-        self._stage2_vbe = VisualBehaviorEncoder(BehaviorEncoderConfig(**vbe_model_config)).to(device)
-        self._stage2_vbe.load_state_dict(vbe_state)
-        self._stage2_vbe.eval()
-        if self._stage2_vbe.cfg.action_dim != self.cfg.action_dim:
-            raise ValueError("VBE action dimension does not match policy action dimension")
+        payload = torch.load(args.cte_checkpoint, map_location="cpu", weights_only=False)
+        cte_model_config = dict(payload["model_config"])
+        cte_state = payload["model"]
+        if any(key.endswith("mixer.weight_ih_l0") for key in cte_state):
+            cte_model_config["use_mamba"] = False
+        elif any(key.endswith("mixer.A_log") for key in cte_state):
+            cte_model_config["use_mamba"] = True
+        self._cte = CausalTransitionEncoder(CausalTransitionEncoderConfig(**cte_model_config)).to(device)
+        self._cte.load_state_dict(remap_legacy_cte_state_dict(cte_state))
+        self._cte.eval()
+        if self._cte.cfg.action_dim != self.cfg.action_dim:
+            raise ValueError("CTE action dimension does not match policy action dimension")
         self._stage2_oracle_enabled = True
-        if self._stage3_retrieval_enabled:
+        if self._static_task_context_enabled:
             log.info(
-                "[robolab-policy-server] learned Stage-3 retrieval enabled "
-                f"bank_entries={len(entries)} top_k={self._stage3_retrieval_top_k}"
+                "[robolab-policy-server] static task-context retrieval enabled "
+                f"bank_entries={len(entries)} top_k={self._static_task_context_top_k}"
             )
         else:
             log.info(
@@ -854,31 +858,31 @@ class RobolabPolicyService:
             )
 
     def _encode_stage2_frame(self, image: np.ndarray) -> torch.Tensor:
-        """Map one already observed concatenated RGB image to the VBE's 48-channel Wan latent."""
+        """Map one observed concatenated RGB image to the CTE's Wan latent."""
         device = next(self.model.parameters()).device
         frame = torch.from_numpy(np.ascontiguousarray(image)).to(device=device, dtype=torch.float32)
         frame = frame.permute(2, 0, 1).unsqueeze(0)
         frame = F.interpolate(frame, size=(480, 832), mode="bilinear", align_corners=False)
         latent = self.model.encode(frame.unsqueeze(2).div_(127.5).sub_(1.0))
-        if latent.ndim != 5 or latent.shape[:3] != (1, self._stage2_vbe.cfg.image_channels, 1):
-            raise RuntimeError(f"Unexpected Wan latent for Stage-2 VBE: {tuple(latent.shape)}")
+        if latent.ndim != 5 or latent.shape[:3] != (1, self._cte.cfg.image_channels, 1):
+            raise RuntimeError(f"Unexpected Wan latent for CTE: {tuple(latent.shape)}")
         return latent[0, :, 0].float().contiguous()
 
-    def _stage3_global_from_initial_observation(self, image: np.ndarray, prompt: str) -> torch.Tensor:
-        """Retrieve the global behavior token from the initial observed image and instruction."""
-        if not self._stage3_retrieval_enabled:
+    def _task_context_from_initial_observation(self, image: np.ndarray, prompt: str) -> torch.Tensor:
+        """Retrieve static task context from the initial observation and instruction."""
+        if not self._static_task_context_enabled:
             return self._stage2_global
         latent = self._encode_stage2_frame(image).unsqueeze(0)
         readout = extract_batch(self.model, latent, [format_action_prompt(prompt)]).to(
             device=latent.device, dtype=torch.float32
         )
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            query = self._stage3_retrieval(readout)
-        values, _, _ = retrieve_behavior_values(
+            query = self._static_task_context_head(readout)
+        values, _, _ = retrieve_static_task_context(
             query,
-            self._stage3_memory_keys,
-            self._stage3_memory_values,
-            top_k=self._stage3_retrieval_top_k,
+            self._static_task_context_keys,
+            self._static_task_context_values,
+            top_k=self._static_task_context_top_k,
         )
         return values.float()
 
@@ -912,9 +916,9 @@ class RobolabPolicyService:
         valid = torch.ones((1, frames.shape[1]), dtype=torch.bool, device=frames.device)
         transition_valid = torch.ones(actions.shape[:-1], dtype=torch.bool, device=frames.device)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            encoded = self._stage2_vbe(frames, actions, valid, transition_valid)
+            encoded = self._cte(frames, actions, valid, transition_valid)
         completed = encoded["effect_post"][0][encoded["effect_complete"][0]].float()
-        history = torch.zeros((1, 4, self._stage2_vbe.cfg.effect_dim), dtype=torch.float32, device=frames.device)
+        history = torch.zeros((1, 4, self._cte.cfg.effect_dim), dtype=torch.float32, device=frames.device)
         history_valid = torch.zeros((1, 4), dtype=torch.bool, device=frames.device)
         take = min(4, completed.shape[0])
         if take:
@@ -926,7 +930,7 @@ class RobolabPolicyService:
         elif self._stage2_effect_mode == "shuffled" and take > 1:
             # Reverse only completed slots and keep their right-aligned causal positions.
             history[0, -take:] = history[0, -take:].flip(dims=(0,))
-        global_feature = self._stage3_global_from_initial_observation(frames_rgb[0], str(obs["prompt"]))
+        global_feature = self._task_context_from_initial_observation(frames_rgb[0], str(obs["prompt"]))
         current_phase = encoded["phase"][:, -1].float()
         current_visual_key = encoded["visual_key"][:, -1].float()
         complete_indices = torch.nonzero(encoded["effect_complete"][0], as_tuple=False).flatten()
@@ -934,7 +938,7 @@ class RobolabPolicyService:
             current_effect_post = encoded["effect_post"][:, complete_indices[-1]].float()
             current_effect_valid = True
         else:
-            current_effect_post = current_phase.new_zeros((1, self._stage2_vbe.cfg.effect_dim))
+            current_effect_post = current_phase.new_zeros((1, self._cte.cfg.effect_dim))
             current_effect_valid = False
         return (
             global_feature,
@@ -1607,7 +1611,7 @@ class RobolabPolicyService:
             if outcome not in {"success", "failure"}:
                 raise ValueError(f"invalid restored outcome {outcome!r}")
             controller.memory.append(
-                OnlineTransition(
+                TransitionRecord(
                     task_cluster=task_cluster,
                     phase=torch.from_numpy(np.ascontiguousarray(phase[index])),
                     visual_key=torch.from_numpy(np.ascontiguousarray(visual_key[index])),

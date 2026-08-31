@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Behavior-conditioned action-prior modules for Cosmos Stage 2."""
+"""Zeva policy-injection modules for the frozen diffusion policy."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from .brief_interaction_trace import BriefInteractionTrace
+
 
 @dataclass
-class ActionPriorConfig:
+class PolicyInjectionConfig:
     global_dim: int = 256
     phase_dim: int = 128
     effect_dim: int = 128
@@ -26,31 +28,12 @@ class ActionPriorConfig:
     min_std: float = 1e-3
 
 
-@dataclass(frozen=True)
-class BriefInteractionTrace:
-    """Paper-aligned BIT: the ordered effects completed in the current attempt.
+class PolicyInjectionPrior(nn.Module):
+    """Fuse task context, phase, and BIT into an action prior."""
 
-    ``effects`` and ``valid`` intentionally retain the tensor layout already
-    used by released Stage-2 checkpoints, so adopting the paper name does not
-    change any parameter names or numerical behavior.
-    """
-
-    effects: Tensor
-    valid: Tensor
-
-    def __post_init__(self) -> None:
-        if self.effects.ndim != 3:
-            raise ValueError("BIT effects must be [B,L,D]")
-        if self.valid.shape != self.effects.shape[:2]:
-            raise ValueError("BIT valid mask must be [B,L]")
-
-
-class ActionPriorNetwork(nn.Module):
-    """PBD: global anchors queried by phase fused with ordered causal effects."""
-
-    def __init__(self, cfg: ActionPriorConfig | None = None) -> None:
+    def __init__(self, cfg: PolicyInjectionConfig | None = None) -> None:
         super().__init__()
-        self.cfg = cfg or ActionPriorConfig()
+        self.cfg = cfg or PolicyInjectionConfig()
         self.global_to_anchors = nn.Linear(self.cfg.global_dim, self.cfg.num_anchors * self.cfg.hidden_dim)
         self.anchor_position = nn.Parameter(torch.empty(1, self.cfg.num_anchors, self.cfg.hidden_dim))
         self.phase_query = nn.Sequential(nn.LayerNorm(self.cfg.phase_dim), nn.Linear(self.cfg.phase_dim, self.cfg.hidden_dim))
@@ -149,8 +132,8 @@ def gaussian_prior_nll(target: Tensor, mean: Tensor, std: Tensor, valid: Tensor 
     return (nll * valid.to(nll.dtype)).sum() / valid.sum().clamp_min(1)
 
 
-class BehaviorActionAdapter(nn.Module):
-    """Project PBD means directly into Cosmos action-token space."""
+class CausalPromptPolicyAdapter(nn.Module):
+    """Project the Zeva action prior into frozen-policy action-token space."""
 
     def __init__(self, *, action_dim: int = 8, hidden_dim: int = 2048) -> None:
         super().__init__()
@@ -166,7 +149,7 @@ class BehaviorActionAdapter(nn.Module):
         if action_length < leading_condition_steps:
             raise ValueError("action_length must include leading conditioning steps")
         if action_length - leading_condition_steps != prior_mean.shape[1]:
-            raise ValueError("PBD horizon must equal the noisy action-step count")
+            raise ValueError("Policy-injection horizon must equal the noisy action-step count")
         embedded = self.prior_to_action_embedding(prior_mean)
         if leading_condition_steps:
             embedded = torch.cat(

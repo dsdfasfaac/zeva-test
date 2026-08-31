@@ -1,4 +1,4 @@
-# RoboCasa Atomic-5 PIM adapter
+# Zeva CTE, BIT, PIM, and Causal Prompt implementation
 
 This path adds paper-aligned Persistent Interaction Memory (PIM) without
 changing the released GRU Stage-2 policy path. PIM is episode-scoped, survives
@@ -13,10 +13,10 @@ aliases does not rename any state-dict key.
 
 | Paper term | Public code name | Compatible historical name |
 | --- | --- | --- |
-| Causal Transition Encoder (CTE) | `CausalTransitionEncoder` | `VisualBehaviorEncoder` |
+| Causal Transition Encoder (CTE) | `CausalTransitionEncoder` | canonical implementation |
 | phase representation | `phase` / `phase_head` | unchanged |
 | effect representation | `effect_pre`, `effect_post` | unchanged |
-| Brief Interaction Trace (BIT) | `BriefInteractionTrace` | `behavior_effect` + `behavior_effect_valid` tensors |
+| Brief Interaction Trace (BIT) | `BriefInteractionTrace` | `effects` + `valid` tensors |
 | Persistent Interaction Memory (PIM) | `PersistentInteractionMemory` | external `_pim` runtime handle |
 | PIM memory entry | `PIMMemoryEntry` | `PersistentInteractionEntry` |
 | phase-conditioned retrieval | `PhaseConditionedPIMRetrieval` / `query_phase()` | direct `query_tensors()` calls |
@@ -24,33 +24,34 @@ aliases does not rename any state-dict key.
 | policy injection | `inject_causal_prompt()` | `add_gated_pim_residual()` |
 | frozen policy | `OmniMoTModel` / `Cosmos3VFMNetwork` | framework-native model names |
 
-`Stage3RetrievalHead` remains **Static Global Behavior Retrieval**. It
+`StaticTaskContextRetrievalHead` remains **static task-context retrieval**. It
 must not be described as PIM retrieval: it queries a frozen training bank from
 the initial observation and instruction, whereas
 `PhaseConditionedPIMRetrieval` queries same-episode interaction evidence using
 the current phase.
 
 The retrieved interaction evidence is projected into the existing global
-behavior prefix through `tanh(gate)`. The gate starts at exactly zero, so the
+task-context prefix through `tanh(gate)`. The gate starts at exactly zero, so the
 untrained PIM checkpoint has the same prefix and token layout as the verified
-Stage-2 model. Training freezes Cosmos, VBE, PBD, the behavior adapter, and the
-existing global projector; only `behavior_pim_encoder`,
-`behavior_pim_projector`, and `behavior_pim_gate` are optimized.
+frozen policy. Training freezes the foundation policy, CTE, policy-injection prior, and existing
+existing task-context projector. The released DCP keeps three legacy serialized
+parameter prefixes for checkpoint compatibility; public code calls them the
+Causal Prompt encoder, projector, and gate.
 
 ## 1. Build phase/effect support for short training
 
 Use the memory bank and feature cache from the same GRU Stage-1 lineage:
 
 ```bash
-export BEHAVIOR_MEMORY_BANK=/path/to/train_memory_effect_v3.pt
-export BEHAVIOR_PHASE_CACHE=/path/to/stage2_effect_feature_cache_v3
-export BEHAVIOR_PIM_TRAINING_BANK=/path/to/persistent_effect_bank_gru.pt
+export ZEVA_TASK_CONTEXT_BANK=/path/to/train_memory_effect_v3.pt
+export ZEVA_CTE_FEATURE_CACHE=/path/to/stage2_effect_feature_cache_v3
+export ZEVA_PIM_TRAINING_BANK=/path/to/persistent_effect_bank_gru.pt
 
 PYTHONPATH=. python -m \
   cosmos_framework.scripts.build_robocasa_persistent_effect_bank \
-  --memory-bank "$BEHAVIOR_MEMORY_BANK" \
-  --feature-cache "$BEHAVIOR_PHASE_CACHE" \
-  --output "$BEHAVIOR_PIM_TRAINING_BANK"
+  --memory-bank "$ZEVA_TASK_CONTEXT_BANK" \
+  --feature-cache "$ZEVA_CTE_FEATURE_CACHE" \
+  --output "$ZEVA_PIM_TRAINING_BANK"
 ```
 
 Each training query excludes its own trajectory and retrieves same-task
@@ -67,9 +68,9 @@ export ROBOCASA365_ROOT=/path/to/robocasa365/target
 export BASE_CHECKPOINT_PATH=/path/to/stage2_iter_000005000
 export QWEN_VLM_PATH=/path/to/Qwen3-VL-8B-Instruct
 export WAN_VAE_PATH=/path/to/Wan2.2_VAE.pth
-export BEHAVIOR_MEMORY_BANK=/path/to/train_memory_effect_v3.pt
-export BEHAVIOR_PHASE_CACHE=/path/to/stage2_effect_feature_cache_v3
-export BEHAVIOR_PIM_TRAINING_BANK=/path/to/persistent_effect_bank_gru.pt
+export ZEVA_TASK_CONTEXT_BANK=/path/to/train_memory_effect_v3.pt
+export ZEVA_CTE_FEATURE_CACHE=/path/to/stage2_effect_feature_cache_v3
+export ZEVA_PIM_TRAINING_BANK=/path/to/persistent_effect_bank_gru.pt
 
 bash examples/launch_sft_action_policy_robocasa365_atomic5_zeva_pim.sh
 ```
@@ -86,13 +87,13 @@ on the original model path:
 
 ```bash
 PYTHONPATH=. CUDA_VISIBLE_DEVICES=0 python -u -m \
-  cosmos_framework.scripts.action_policy_server_robocasa365_stage3_online_memory \
+  cosmos_framework.scripts.action_policy_server_robocasa365_zeva_pim \
   --checkpoint-path "$BASE_CHECKPOINT_PATH" --allow-dcp-checkpoint \
   --experiment action_policy_robocasa365_atomic5_zeva_stage2 \
   --experiment-overrides model.config.tokenizer.vae_path="$WAN_VAE_PATH" \
-  --stage2-memory-bank "$BEHAVIOR_MEMORY_BANK" \
-  --stage2-vbe-checkpoint /path/to/behavior_vbe_step_000500.pt \
-  --stage3-retrieval-checkpoint /path/to/stage3_iter_000005000/best.pt \
+  --task-context-bank "$ZEVA_TASK_CONTEXT_BANK" \
+  --cte-checkpoint /path/to/cte_step_000500.pt \
+  --static-task-context-checkpoint /path/to/static_task_context/best.pt \
   --pim-shadow --pim-top-k 4 \
   --num-steps 30 --guidance 3.0 --shift 5.0 \
   --action-dim 7 --action-chunk-size 32 --conditioning-fps 20 \
@@ -117,7 +118,7 @@ Evaluate repeated attempts on one fixed environment seed:
 
 ```bash
 PYTHONPATH=. python -m \
-  cosmos_framework.scripts.eval_zeva_robocasa365_online_memory \
+  cosmos_framework.scripts.eval_zeva_robocasa365_pim \
   --task TurnOnMicrowave --host 127.0.0.1 --port 8300 \
   --episodes 10 --seed 195 --seed-mode fixed \
   --expect-memory-conditioning on \

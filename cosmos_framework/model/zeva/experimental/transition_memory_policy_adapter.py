@@ -15,7 +15,7 @@ from torch import Tensor, nn
 ACTION_PROJECTOR_FORMAT = "robocasa_atomic5_online_memory_action_projector_v1"
 
 
-class OnlineMemoryActionProjector(nn.Module):
+class TransitionMemoryPolicyAdapter(nn.Module):
     """Predict a bounded 32x7 residual from the learned memory context."""
 
     def __init__(

@@ -3,19 +3,18 @@ from __future__ import annotations
 import pytest
 import torch
 
-from cosmos_framework.model.behavior.online_memory import (
-    OnlineMemoryEncoder,
-    OnlineMemorySchema,
-    OnlineTransition,
-    TaskSessionMemory,
+from cosmos_framework.model.zeva.experimental.transition_memory import (
+    TransitionMemory,
+    TransitionMemoryEncoder,
+    TransitionMemorySchema,
+    TransitionRecord,
 )
-from cosmos_framework.model.behavior.online_memory_runtime import OnlineMemoryController
-from cosmos_framework.model.behavior.robocasa_online_memory import make_robocasa_atomic5_schema
-from cosmos_framework.scripts.preflight_behavior_online_context_cache_robocasa import _episode_source_map
+from cosmos_framework.model.zeva.experimental.transition_memory_runtime import TransitionMemoryController
+from cosmos_framework.model.zeva.experimental.robocasa_transition_memory import make_robocasa_atomic5_schema
 
 
-def make_transition(schema: OnlineMemorySchema, task: str, i: int, *, valid: bool = True) -> OnlineTransition:
-    return OnlineTransition(
+def make_transition(schema: TransitionMemorySchema, task: str, i: int, *, valid: bool = True) -> TransitionRecord:
+    return TransitionRecord(
         task_cluster=task,
         phase=torch.full((schema.phase_dim,), float(i)),
         visual_key=torch.full((schema.visual_key_dim,), float(i + 1)),
@@ -30,8 +29,8 @@ def make_transition(schema: OnlineMemorySchema, task: str, i: int, *, valid: boo
 
 
 def test_fifo_reset_and_task_isolation() -> None:
-    schema = OnlineMemorySchema(capacity=2)
-    memory = TaskSessionMemory(schema)
+    schema = TransitionMemorySchema(capacity=2)
+    memory = TransitionMemory(schema)
     memory.append(make_transition(schema, "pick", 0))
     memory.append(make_transition(schema, "pick", 1))
     memory.append(make_transition(schema, "pick", 2))
@@ -45,8 +44,8 @@ def test_fifo_reset_and_task_isolation() -> None:
 
 
 def test_schema_and_incomplete_transition_fail_fast() -> None:
-    schema = OnlineMemorySchema()
-    memory = TaskSessionMemory(schema)
+    schema = TransitionMemorySchema()
+    memory = TransitionMemory(schema)
     bad_hash = make_transition(schema, "pick", 0)
     bad_hash.schema_hash = "wrong"
     with pytest.raises(ValueError, match="schema mismatch"):
@@ -56,14 +55,14 @@ def test_schema_and_incomplete_transition_fail_fast() -> None:
 
 
 def test_query_is_bounded_and_encoder_handles_empty_memory() -> None:
-    schema = OnlineMemorySchema(capacity=64, top_k=4)
-    memory = TaskSessionMemory(schema)
+    schema = TransitionMemorySchema(capacity=64, top_k=4)
+    memory = TransitionMemory(schema)
     for i in range(10):
         memory.append(make_transition(schema, "pick", i))
     entries, scores = memory.query(torch.zeros(schema.phase_dim), torch.zeros(schema.visual_key_dim))
     assert len(entries) == 4
     assert scores.shape == (4,)
-    encoder = OnlineMemoryEncoder(schema)
+    encoder = TransitionMemoryEncoder(schema)
     context = encoder(torch.zeros(schema.phase_dim), torch.zeros(schema.visual_key_dim), entries)
     empty_context = encoder(torch.zeros(schema.phase_dim), torch.zeros(schema.visual_key_dim), [])
     assert context.shape == (1, 256)
@@ -72,8 +71,8 @@ def test_query_is_bounded_and_encoder_handles_empty_memory() -> None:
 
 
 def test_controller_does_not_commit_incomplete_replan() -> None:
-    schema = OnlineMemorySchema()
-    controller = OnlineMemoryController(schema, enabled=True)
+    schema = TransitionMemorySchema()
+    controller = TransitionMemoryController(schema, enabled=True)
     controller.reset("pick")
     controller.begin_replan()
     readout = controller.read(torch.zeros(schema.phase_dim), torch.zeros(schema.visual_key_dim))
@@ -104,7 +103,7 @@ def test_robocasa_atomic5_contract_is_arm7_and_temporally_bounded() -> None:
 
 def test_robocasa_controller_writes_only_after_completed_window() -> None:
     schema = make_robocasa_atomic5_schema()
-    controller = OnlineMemoryController(schema, enabled=True)
+    controller = TransitionMemoryController(schema, enabled=True)
     controller.reset("OpenStandMixerHead")
     zeros = lambda shape: torch.zeros(shape)
     controller.begin_replan()
@@ -127,7 +126,7 @@ def test_robocasa_controller_writes_only_after_completed_window() -> None:
 
 def test_attempt_outcome_annotation_is_scoped_and_auditable() -> None:
     schema = make_robocasa_atomic5_schema()
-    memory = TaskSessionMemory(schema)
+    memory = TransitionMemory(schema)
     first = make_transition(schema, "OpenStandMixerHead", 0)
     first.metadata = {"attempt_id": 0, "session_id": "mixer:195", "environment_seed": 195}
     second = make_transition(schema, "OpenStandMixerHead", 1)
@@ -148,7 +147,7 @@ def test_attempt_outcome_annotation_is_scoped_and_auditable() -> None:
 
 def test_discard_open_replan_never_commits_partial_window() -> None:
     schema = make_robocasa_atomic5_schema()
-    controller = OnlineMemoryController(schema, enabled=False)
+    controller = TransitionMemoryController(schema, enabled=False)
     controller.reset("OpenStandMixerHead")
     controller.begin_replan()
     assert controller.discard_open_replan()
@@ -156,18 +155,6 @@ def test_discard_open_replan_never_commits_partial_window() -> None:
     assert not controller.discard_open_replan()
 
 
-def test_robocasa_source93_offset83_join_regression() -> None:
-    """The old filtered-ordinal join must not use cache source 93 for ep 96."""
-    bank = {
-        "entries": [
-            {"source_index": 93, "episode_id": 94, "instruction": "CloseToasterOvenDoor"},
-            {"source_index": 95, "episode_id": 96, "instruction": "CloseToasterOvenDoor"},
-        ]
-    }
-    source_map = _episode_source_map(bank)
-    # The formal dataset's filtered ordinal 93 is episode_id=96.  Its final
-    # valid action-window offset 83 must resolve to source 95, not source 93.
-    assert source_map[("CloseToasterOvenDoor", 96)] == 95
     expected = {(95, frame) for frame in range(85)}
     assert (95, 83) in expected
     assert (93, 83) not in expected

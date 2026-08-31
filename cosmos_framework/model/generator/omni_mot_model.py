@@ -75,7 +75,7 @@ from cosmos_framework.data.generator.sequence_packing import (
     pack_input_sequence,
 )
 from cosmos_framework.data.generator.sequence_packing.modality import add_special_tokens
-from cosmos_framework.model.behavior import gaussian_prior_nll
+from cosmos_framework.model.zeva import gaussian_prior_nll
 from cosmos_framework.model.generator.tokenizers.interface import VideoTokenizerInterface
 from cosmos_framework.model.generator.upsampler.prompts import build_messages, clean_response
 from cosmos_framework.utils.generator.data_utils import get_vision_data_resolution, read_positive_int_metadata
@@ -702,7 +702,7 @@ class OmniMoTModel(ImaginaireModel):
         gen_data_clean: GenerationDataClean,
         action_sample_indices: list[int],
     ) -> None:
-        """Attach frozen VBE features and raw PBD targets after packing.
+        """Attach frozen CTE features and policy-injection targets after packing.
 
         The dataset emits one global memory value and one precomputed phase per
         original sample. ``x0_tokens_action`` is dense over action-bearing
@@ -2789,12 +2789,12 @@ class OmniMoTModel(ImaginaireModel):
                 timestep,
             )
 
-        # Training attaches the frozen behavior features after packing.  Do
+        # Training attaches the frozen CTE features after packing. Do
         # exactly the same for every inference denoising step (including both
-        # CFG branches), otherwise an enabled Stage-2 PBD sees no prefix.
+        # CFG branches), otherwise an enabled Zeva policy prior sees no prefix.
         if self.config.behavior_stage2.enabled:
             if stage2_data_batch is None or stage2_action_sample_indices is None:
-                raise KeyError("Stage-2 inference requires behavior feature tensors")
+                raise KeyError("Zeva inference requires CTE feature tensors")
             self._attach_stage2_behavior(
                 packed_sequence,
                 stage2_data_batch,
@@ -4963,7 +4963,7 @@ class OmniMoTModel(ImaginaireModel):
             output_dict["preds_action"] = out_net["preds_action"]
         if self.config.sound_gen and "preds_sound" in out_net:
             output_dict["preds_sound"] = out_net["preds_sound"]
-        # Stage-2 PBD returns its Gaussian action prior alongside the modality
+        # Zeva policy injection returns its Gaussian action prior alongside the modality
         # predictions. Preserve these tensors (and their autograd graph) so
         # _compute_losses can apply the auxiliary behavior_prior_nll.
         for key in ("behavior_prior_mean", "behavior_prior_std"):

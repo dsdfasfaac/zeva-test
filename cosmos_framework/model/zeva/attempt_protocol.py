@@ -1,4 +1,4 @@
-"""Frozen Phase-0 contract for RoboCasa Atomic-5 test-time scaling.
+"""Frozen repeated-attempt protocol for RoboCasa Atomic-5 evaluation.
 
 This module intentionally has no simulator or model dependencies so clients,
 servers, tests, and result auditors can share one exact protocol definition.

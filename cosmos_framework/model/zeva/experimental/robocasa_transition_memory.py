@@ -1,13 +1,14 @@
-"""RoboCasa Atomic-5 online-memory contract.
+"""RoboCasa Atomic-5 experimental transition-memory contract.
 
 This module keeps the RoboCasa contract separate from the ARX defaults in
-``online_memory.py``.  In particular, RoboCasa uses the frozen Atomic-5 VBE,
+the generic transition-memory defaults. In particular, RoboCasa uses the
+frozen Atomic-5 CTE,
 7-dimensional arm actions and the left-agent/wrist 20-Hz temporal contract.
 """
 
 from __future__ import annotations
 
-from .online_memory import OnlineMemorySchema
+from .transition_memory import TransitionMemorySchema
 
 
 ROBOCASA_ATOMIC5_TASKS = (
@@ -25,7 +26,7 @@ def make_robocasa_atomic5_schema(
     vae_temporal_hash: str = "",
     capacity: int = 64,
     top_k: int = 4,
-) -> OnlineMemorySchema:
+) -> TransitionMemorySchema:
     """Return the single schema accepted by Atomic-5 online memory.
 
     ``vbe_hash`` and ``vae_temporal_hash`` are part of the schema hash.  A
@@ -33,7 +34,7 @@ def make_robocasa_atomic5_schema(
     therefore rejected instead of silently mixing representations.
     """
 
-    return OnlineMemorySchema(
+    return TransitionMemorySchema(
         version="robocasa_atomic5_online_memory_v1",
         task_contract="robocasa365_atomic5_5task_left_wrist_arm7_20hz_cosmos32_exec16",
         phase_dim=128,

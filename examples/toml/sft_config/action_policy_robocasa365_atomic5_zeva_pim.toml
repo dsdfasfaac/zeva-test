@@ -1,5 +1,5 @@
 # Frozen-policy PIM adapter. BASE_CHECKPOINT_PATH must be the verified GRU
-# Stage2 iter-5k DCP; only the three behavior_pim_* modules are optimized.
+# Stage2 iter-5k DCP; only the Causal Prompt encoder, projector, and gate are optimized.
 
 [job]
 task = "vfm"

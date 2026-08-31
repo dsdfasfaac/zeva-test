@@ -7,7 +7,7 @@ The runtime store is deliberately non-parametric: it accepts only completed
 interaction effects, merges similar phase/effect prototypes, and retrieves by
 the *current* phase.  ``CausalPromptEncoder`` (the paper's ``F_mem``) is the
 small trainable module that turns task, phase, BIT, and retrieved PIM tensors
-into a single residual context for the already-trained behavior prefix.
+into a single residual context for the frozen policy prefix.
 """
 
 from __future__ import annotations
@@ -389,26 +389,8 @@ def inject_causal_prompt(
 ) -> Tensor:
     """Inject the paper's causal prompt with an exact ``gate == 0`` bypass."""
     if base_prefix.shape != causal_prompt.shape:
-        raise ValueError("Causal prompt must match the existing behavior-prefix shape")
+        raise ValueError("Causal prompt must match the existing task-context prefix shape")
     if persistent_valid.ndim != 2 or persistent_valid.shape[0] != base_prefix.shape[0]:
         raise ValueError("persistent_valid must be [B,K]")
     has_pim = persistent_valid.any(dim=-1, keepdim=True).to(causal_prompt.dtype)
     return base_prefix + torch.tanh(gate).to(causal_prompt.dtype) * causal_prompt * has_pim
-
-
-def add_gated_pim_residual(
-    base_prefix: Tensor,
-    pim_residual: Tensor,
-    gate: Tensor,
-    persistent_valid: Tensor,
-) -> Tensor:
-    """Backward-compatible name for :func:`inject_causal_prompt`."""
-    return inject_causal_prompt(base_prefix, pim_residual, gate, persistent_valid)
-
-
-# Backward-compatible engineering names.  These aliases preserve existing
-# recipes and imports while the defining classes use the paper terminology.
-PersistentInteractionEntry = PIMMemoryEntry
-PersistentInteractionPromptConfig = CausalPromptConfig
-PersistentInteractionPromptEncoder = CausalPromptEncoder
-PromptMemoryFusion = CausalPromptEncoder

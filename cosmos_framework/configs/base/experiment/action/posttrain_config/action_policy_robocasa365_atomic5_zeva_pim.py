@@ -23,8 +23,8 @@ action_policy_robocasa365_atomic5_zeva_pim["job"].update(
     group="pim_adapter_robocasa_atomic5",
     name="action_policy_robocasa365_atomic5_zeva_pim",
 )
-behavior = action_policy_robocasa365_atomic5_zeva_pim["model"]["config"]["behavior_stage2"]
-behavior.update(
+zeva_policy = action_policy_robocasa365_atomic5_zeva_pim["model"]["config"]["behavior_stage2"]
+zeva_policy.update(
     pim_memory_enabled=True,
     pim_persistent_length=4,
     pim_context_dim=256,
@@ -50,7 +50,7 @@ action_policy_robocasa365_atomic5_zeva_pim["checkpoint"]["keys_to_skip_loading"]
 dataset = action_policy_robocasa365_atomic5_zeva_pim["dataloader_train"]["dataloader"]["datasets"][
     "robocasa365"
 ]["dataset"]
-dataset["behavior_pim_training_bank"] = "${oc.env:BEHAVIOR_PIM_TRAINING_BANK}"
+dataset["behavior_pim_training_bank"] = "${oc.env:ZEVA_PIM_TRAINING_BANK}"
 dataset["behavior_pim_history_length"] = 4
 dataset["behavior_pim_context_dropout"] = 0.2
 dataset["behavior_pim_support_dropout"] = 0.2

@@ -77,8 +77,8 @@ class PackedSequenceBuilder:
     text_ids: list[int] = field(default_factory=list)
     text_indexes: list[int] = field(default_factory=list)
     # Learned non-text condition slots that share the causal/understanding
-    # attention split with text. Stage-2 BehaviorVLA reserves one such slot per
-    # action-bearing sample and overwrites it with the projected global behavior.
+    # attention split with text. Zeva reserves one such slot per action-bearing
+    # sample and overwrites it with the projected task context.
     behavior_indexes: list[int] = field(default_factory=list)
     online_memory_indexes: list[int] = field(default_factory=list)
     proprio_indexes: list[int] = field(default_factory=list)
@@ -217,8 +217,8 @@ class PackedSequenceBuilder:
         if num_proprio_prefix_tokens < 0:
             raise ValueError("num_proprio_prefix_tokens must be non-negative")
 
-        # Reserve learned behavior slots before BOS, matching BehaviorVLA's
-        # [behavior | image | language] prefix order. They are deliberately not
+        # Reserve learned causal-prompt slots before BOS, matching Zeva's
+        # [causal prompt | image | language] prefix order. They are deliberately not
         # represented by tokenizer IDs and therefore do not participate in CE.
         if num_behavior_prefix_tokens:
             behavior_position_ids, self._mrope_temporal_offset = get_3d_mrope_ids_text_tokens(

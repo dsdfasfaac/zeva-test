@@ -29,10 +29,11 @@ _TARGET_ALIASES = {
     "projects.cosmos3.vfm.tokenizers.wan2pt2_vae_4x16x16.Wan2pt2VAEInterface": "wan2pt2_vae_interface",
 }
 
-# The behavior training branch exposes config classes under the
+# The Zeva training branch exposes config classes under the
 # cosmos_framework.configs.* package path (mirrors of projects.cosmos3.vfm.*).
 # Map them to the same public aliases so exported HF configs stay identical.
 _CF_TYPE_ALIASES = {
+    "cosmos_framework.configs.base.defaults.model_config.ZevaPolicyConfig": "zeva_policy_config",
     "cosmos_framework.configs.base.defaults.model_config.BehaviorStage2Config": "behavior_stage2_config",
     "cosmos_framework.configs.base.defaults.model_config.ProprioConditionConfig": "proprio_condition_config",
     "cosmos_framework.configs.base.defaults.model_config.DiffusionExpertConfig": "diffusion_expert_config",
@@ -57,7 +58,8 @@ _CF_TYPE_ALIASES = {
 }
 
 _TYPE_ALIASES = {
-    # behavior branch (canonicalized under projects.cosmos3.vfm.configs.base.*)
+    # Zeva branch (canonicalized under projects.cosmos3.vfm.configs.base.*)
+    "projects.cosmos3.vfm.configs.base.defaults.model_config.ZevaPolicyConfig": "zeva_policy_config",
     "projects.cosmos3.vfm.configs.base.defaults.model_config.BehaviorStage2Config": "behavior_stage2_config",
     "projects.cosmos3.vfm.configs.base.defaults.model_config.ProprioConditionConfig": "proprio_condition_config",
     "projects.cosmos3.vfm.configs.base.defaults.activation_checkpointing.ActivationCheckpointingConfig": "activation_checkpointing_config",

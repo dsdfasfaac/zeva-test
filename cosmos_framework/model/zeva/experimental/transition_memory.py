@@ -1,4 +1,4 @@
-"""Causal, task-session online memory for ARX behavior conditioning.
+"""Experimental transition memory retained for non-paper ablations.
 
 The memory stores only completed 16-control transitions.  It is deliberately
 independent of the Cosmos model so that real-robot code can run it in shadow
@@ -19,7 +19,7 @@ import torch.nn.functional as F
 
 
 @dataclass(frozen=True)
-class OnlineMemorySchema:
+class TransitionMemorySchema:
     """Dimensions and temporal contract used by one memory session."""
 
     version: str = "arx_online_memory_v1"
@@ -41,7 +41,7 @@ class OnlineMemorySchema:
 
 
 @dataclass
-class OnlineTransition:
+class TransitionRecord:
     """One causally completed replan transition."""
 
     task_cluster: str
@@ -56,9 +56,9 @@ class OnlineTransition:
     valid: bool = True
     metadata: dict[str, object] = field(default_factory=dict)
 
-    def cpu(self) -> "OnlineTransition":
+    def cpu(self) -> "TransitionRecord":
         """Detach tensors so the session never retains a training graph."""
-        return OnlineTransition(
+        return TransitionRecord(
             task_cluster=self.task_cluster,
             phase=self.phase.detach().float().cpu().contiguous(),
             visual_key=self.visual_key.detach().float().cpu().contiguous(),
@@ -73,13 +73,13 @@ class OnlineTransition:
         )
 
 
-class TaskSessionMemory:
+class TransitionMemory:
     """Bounded FIFO memory scoped to one task session."""
 
-    def __init__(self, schema: OnlineMemorySchema | None = None) -> None:
-        self.schema = schema or OnlineMemorySchema()
+    def __init__(self, schema: TransitionMemorySchema | None = None) -> None:
+        self.schema = schema or TransitionMemorySchema()
         self._task_cluster: str | None = None
-        self._entries: deque[OnlineTransition] = deque(maxlen=self.schema.capacity)
+        self._entries: deque[TransitionRecord] = deque(maxlen=self.schema.capacity)
 
     @property
     def task_cluster(self) -> str | None:
@@ -89,7 +89,7 @@ class TaskSessionMemory:
         return len(self._entries)
 
     @property
-    def entries(self) -> tuple[OnlineTransition, ...]:
+    def entries(self) -> tuple[TransitionRecord, ...]:
         """Return a stable, read-only snapshot for audit/finalization."""
         return tuple(self._entries)
 
@@ -97,7 +97,7 @@ class TaskSessionMemory:
         self._entries.clear()
         self._task_cluster = task_cluster
 
-    def _validate(self, transition: OnlineTransition) -> None:
+    def _validate(self, transition: TransitionRecord) -> None:
         if transition.schema_hash != self.schema.hash:
             raise ValueError(
                 "online memory schema mismatch: "
@@ -118,7 +118,7 @@ class TaskSessionMemory:
         if not transition.valid:
             raise ValueError("invalid or incomplete transitions must not enter online memory")
 
-    def append(self, transition: OnlineTransition) -> None:
+    def append(self, transition: TransitionRecord) -> None:
         """Append one completed transition, resetting on a task change."""
         self._validate(transition)
         if self._task_cluster is None:
@@ -169,7 +169,7 @@ class TaskSessionMemory:
         visual_key: torch.Tensor,
         *,
         top_k: int | None = None,
-    ) -> tuple[list[OnlineTransition], torch.Tensor]:
+    ) -> tuple[list[TransitionRecord], torch.Tensor]:
         """Return cosine-ranked history entries and scores."""
         if phase.shape != (self.schema.phase_dim,) or visual_key.shape != (self.schema.visual_key_dim,):
             raise ValueError("query phase/visual_key shape mismatch")
@@ -187,12 +187,12 @@ class TaskSessionMemory:
         return entries, values
 
 
-class OnlineMemoryEncoder(nn.Module):
+class TransitionMemoryEncoder(nn.Module):
     """Encode top-k transitions into one 256-D causal context token."""
 
-    def __init__(self, schema: OnlineMemorySchema | None = None, hidden_dim: int = 256) -> None:
+    def __init__(self, schema: TransitionMemorySchema | None = None, hidden_dim: int = 256) -> None:
         super().__init__()
-        self.schema = schema or OnlineMemorySchema()
+        self.schema = schema or TransitionMemorySchema()
         self.hidden_dim = hidden_dim
         value_dim = (
             self.schema.phase_dim
@@ -214,7 +214,7 @@ class OnlineMemoryEncoder(nn.Module):
         self,
         phase: torch.Tensor,
         visual_key: torch.Tensor,
-        entries: Iterable[OnlineTransition] | None = None,
+        entries: Iterable[TransitionRecord] | None = None,
     ) -> torch.Tensor:
         """Return ``[B, hidden_dim]`` or ``[hidden_dim]`` for one query."""
         if phase.ndim == 1:
@@ -222,7 +222,7 @@ class OnlineMemoryEncoder(nn.Module):
         if visual_key.ndim == 1:
             visual_key = visual_key.unsqueeze(0)
         if phase.shape[0] != 1 or visual_key.shape[0] != 1:
-            raise ValueError("OnlineMemoryEncoder currently accepts one query at a time")
+            raise ValueError("TransitionMemoryEncoder currently accepts one query at a time")
         device = phase.device
         query = torch.cat((phase.float(), visual_key.float()), dim=-1)
         q = self.query_proj(query)

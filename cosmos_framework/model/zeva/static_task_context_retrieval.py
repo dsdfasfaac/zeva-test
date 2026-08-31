@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Stage-3 projection head and frozen-memory retrieval utilities."""
+"""Static task-context retrieval, distinct from phase-conditioned PIM retrieval."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from torch.nn import functional as F
 
 
 @dataclass(frozen=True)
-class BehaviorRetrievalConfig:
+class StaticTaskContextRetrievalConfig:
     input_dim: int = 4096
     hidden_dim: int = 1024
     output_dim: int = 128
@@ -23,10 +23,10 @@ class BehaviorRetrievalConfig:
         return asdict(self)
 
 
-class Stage3RetrievalHead(nn.Module):
-    """Map a frozen Cosmos action-branch readout into Stage-1 key space."""
+class StaticTaskContextRetrievalHead(nn.Module):
+    """Map a frozen policy readout into the static task-context key space."""
 
-    def __init__(self, config: BehaviorRetrievalConfig) -> None:
+    def __init__(self, config: StaticTaskContextRetrievalConfig) -> None:
         super().__init__()
         self.config = config
         self.projection = nn.Sequential(
@@ -73,7 +73,7 @@ def bidirectional_supervised_contrastive_loss(
 
 
 @torch.no_grad()
-def retrieve_behavior_values(
+def retrieve_static_task_context(
     queries: Tensor,
     memory_keys: Tensor,
     memory_values: Tensor,
@@ -81,7 +81,7 @@ def retrieve_behavior_values(
     top_k: int = 5,
     temperature: float = 0.07,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Retrieve and softmax-average frozen behavior values for each query."""
+    """Retrieve and softmax-average frozen task-context values for each query."""
     if queries.ndim != 2 or memory_keys.ndim != 2 or memory_values.ndim != 2:
         raise ValueError("queries, memory_keys, and memory_values must be rank-2 tensors")
     if queries.shape[-1] != memory_keys.shape[-1]:

@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import torch
 
-from cosmos_framework.model.behavior.pim import (
+from cosmos_framework.model.zeva.causal_prompt import (
     CausalPromptConfig,
     CausalPromptEncoder,
-    PersistentInteractionMemory,
-    PersistentInteractionMemoryConfig,
-    PersistentInteractionPromptConfig,
-    PersistentInteractionPromptEncoder,
-    PhaseConditionedPIMRetrieval,
-    PIMMemoryEntry,
-    PromptMemoryFusion,
-    add_gated_pim_residual,
     inject_causal_prompt,
 )
+from cosmos_framework.model.zeva.persistent_interaction_memory import (
+    PersistentInteractionMemory,
+    PersistentInteractionMemoryConfig,
+    PIMMemoryEntry,
+)
+from cosmos_framework.model.zeva.phase_conditioned_retrieval import PhaseConditionedPIMRetrieval
 
 
 def _unit(index: int, dim: int = 4) -> torch.Tensor:
@@ -92,16 +90,16 @@ def test_zero_gate_is_exact_released_prefix_bypass() -> None:
     base = torch.randn(3, 16)
     residual = torch.randn_like(base)
     valid = torch.tensor([[1, 0], [0, 0], [1, 1]], dtype=torch.bool)
-    output = add_gated_pim_residual(base, residual, torch.zeros(1), valid)
+    output = inject_causal_prompt(base, residual, torch.zeros(1), valid)
     assert torch.equal(output, base)
-    opened = add_gated_pim_residual(base, residual, torch.ones(1), valid)
+    opened = inject_causal_prompt(base, residual, torch.ones(1), valid)
     assert not torch.equal(opened[0], base[0])
     assert torch.equal(opened[1], base[1])
     assert torch.equal(inject_causal_prompt(base, residual, torch.zeros(1), valid), base)
 
 
 def test_prompt_encoder_fuses_task_bit_and_pim_tensors() -> None:
-    cfg = PersistentInteractionPromptConfig(
+    cfg = CausalPromptConfig(
         global_dim=8,
         phase_dim=4,
         effect_dim=4,
@@ -110,7 +108,7 @@ def test_prompt_encoder_fuses_task_bit_and_pim_tensors() -> None:
         hidden_dim=8,
         num_heads=2,
     )
-    encoder = PersistentInteractionPromptEncoder(cfg)
+    encoder = CausalPromptEncoder(cfg)
     output = encoder(
         torch.randn(3, 8),
         torch.randn(3, 4),
@@ -124,11 +122,7 @@ def test_prompt_encoder_fuses_task_bit_and_pim_tensors() -> None:
     assert torch.isfinite(output).all()
 
 
-def test_paper_names_preserve_legacy_prompt_and_entry_types() -> None:
-    assert CausalPromptConfig is PersistentInteractionPromptConfig
-    assert CausalPromptEncoder is PersistentInteractionPromptEncoder
-    assert PromptMemoryFusion is PersistentInteractionPromptEncoder
-
+def test_pim_entries_use_paper_type() -> None:
     memory = PersistentInteractionMemory(
         PersistentInteractionMemoryConfig(phase_dim=4, effect_dim=4)
     )

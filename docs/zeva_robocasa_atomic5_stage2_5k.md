@@ -9,7 +9,7 @@ tags:
   - vision-language-action
   - cosmos
   - robocasa
-  - behavior-retrieval
+  - static-task-context-retrieval
   - dcp
 ---
 
@@ -21,8 +21,8 @@ This bundle contains the inference artifacts selected by a full Stage2 checkpoin
 
 - Backbone: Cosmos3-Nano action policy.
 - Baseline: RoboCasa Atomic-5 `iter_000025000`.
-- Stage 1: frozen effect-v3 VBE, behavior memory bank, and causal phase/effect features.
-- Stage 2: `iter_000005000`, warm-started from the Atomic-5 baseline and trained with oracle global behavior.
+- Stage 1: frozen CTE, static task-context bank, and phase/causal-effect features.
+- Stage 2: `iter_000005000`, warm-started from the Atomic-5 baseline and trained with oracle task context.
 - Stage 3: retrieval head trained specifically from the Stage2-5k readout; it is not reused from another checkpoint.
 - Public source base: NVIDIA Cosmos Framework commit `ee58e41467f33c49ddde08b4d0ef4923876a95ac`, plus the zeva inference overlay in the linked code release.
 
@@ -40,7 +40,7 @@ This bundle contains the inference artifacts selected by a full Stage2 checkpoin
 │   │   ├── .metadata
 │   │   └── __0_0.distcp ... __7_0.distcp
 │   ├── stage1/
-│   │   ├── behavior_vbe_step_000500.pt
+│   │   ├── cte_step_000500.pt
 │   │   └── train_memory_effect_v3.pt
 │   └── stage3_iter_000005000/
 │       ├── best.pt
@@ -86,19 +86,19 @@ export RELEASE_ROOT=/absolute/path/to/zeva
 export PYTHONPATH=.
 
 CUDA_VISIBLE_DEVICES=0 python -u -m \
-  cosmos_framework.scripts.action_policy_server_robocasa365_stage3 \
+  cosmos_framework.scripts.action_policy_server_robocasa365_zeva \
   --checkpoint-path "$RELEASE_ROOT/weights/stage2_iter_000005000" \
   --allow-dcp-checkpoint \
   --experiment action_policy_robocasa365_atomic5_zeva_stage2 \
   --experiment-overrides \
     model.config.tokenizer.vae_path="$WAN_VAE_PATH" \
-  --stage2-memory-bank \
+  --task-context-bank \
     "$RELEASE_ROOT/weights/stage1/train_memory_effect_v3.pt" \
-  --stage2-vbe-checkpoint \
-    "$RELEASE_ROOT/weights/stage1/behavior_vbe_step_000500.pt" \
-  --stage3-retrieval-checkpoint \
+  --cte-checkpoint \
+    "$RELEASE_ROOT/weights/stage1/cte_step_000500.pt" \
+  --static-task-context-checkpoint \
     "$RELEASE_ROOT/weights/stage3_iter_000005000/best.pt" \
-  --stage3-retrieval-top-k 5 \
+  --static-task-context-top-k 5 \
   --domain-name robocasa-panda-omron \
   --host 0.0.0.0 --port 8300 \
   --num-steps 30 --guidance 3.0 --shift 5.0 \
@@ -111,7 +111,7 @@ CUDA_VISIBLE_DEVICES=0 python -u -m \
 
 The `--no-use-state` flag disables the legacy action-as-state path. The fixed-base independent 9D proprioception path embedded in this model remains enabled.
 `--format-prompt-as-json` is mandatory: Atomic-5 was trained with the structured
-RoboCasa action prompt. The specialized Stage-3 server enables it by default,
+RoboCasa action prompt. The Zeva server enables it by default,
 but it is kept explicit above so the inference contract is auditable.
 
 The included `robocasa365_target_action_stats.json` is the exact target-set
@@ -160,7 +160,7 @@ and, when the system loader cannot find EGL, prepend the directory containing
 At startup, require the following server log contract before evaluating:
 
 ```text
-learned Stage-3 retrieval enabled bank_entries=2495 top_k=5
+static task-context retrieval enabled bank_entries=2495 top_k=5
 ready domain='robocasa-panda-omron' domain_id=22 ... chunk=32 ...
 guidance=3.0 num_steps=30 shift=5.0 prompt_json=True
 ```
